@@ -2,7 +2,7 @@
 
 # Ableton MCP
 
-**Connect Ableton Live to Claude AI**
+**Connect Ableton Live to Codex, ChatGPT, Claude, and other MCP clients**
 
 Prompt-assisted music production, end-to-end track creation, and Live session and arrangement manipulation — driven by AI.
 
@@ -32,6 +32,8 @@ Otherwise, install from [uv's official website](https://docs.astral.sh/uv/gettin
 > **Warning:** Do not proceed before installing uv.
 
 **2. Add the MCP server to your client**
+
+For **Codex** or **ChatGPT**, follow [OpenAI client setup](#openai-client-setup). Those commands run this GitHub fork so the MCP server and the installed Live script come from the same revision.
 
 <details open>
 <summary><b>Claude Desktop</b> — Settings → Developer → Edit Config</summary>
@@ -76,13 +78,14 @@ uvx --from ableton-mcp ableton-mcp-install-script --list-targets   # preview tar
 3. In the **Control Surface** dropdown, select **AbletonMCP**
 4. Set **Input** and **Output** to **None**
 
-That's it — ask Claude to build something.
+Ask your MCP client to read the current tempo and track count before editing the Set.
 
 ---
 
 ## Table of Contents
 
 - [Quickstart](#quickstart)
+- [OpenAI client setup](#openai-client-setup)
 - [Features](#features)
 - [Components](#components)
 - [Installation](#installation)
@@ -121,8 +124,55 @@ That's it — ask Claude to build something.
 
 The system consists of two main components:
 
-1. **Ableton Remote Script** (`Ableton_Remote_Script/__init__.py`) — a MIDI Remote Script for Ableton Live that creates a socket server to receive and execute commands
-2. **MCP Server** (`server.py`) — a Python server that implements the Model Context Protocol and connects to the Ableton Remote Script
+1. **Ableton Remote Script** (`AbletonMCP_Remote_Script/__init__.py`) — a MIDI Remote Script for Ableton Live that creates a socket server to receive and execute commands
+2. **MCP Server** (`MCP_Server/server.py`) — a Python server that implements the Model Context Protocol and connects to the Ableton Remote Script
+
+---
+
+## OpenAI client setup
+
+Run these commands on the computer that runs Live. With `uv` installed, clone this fork and install its bundled Remote Script:
+
+```bash
+git clone https://github.com/dev-universe/ableton-mcp.git "$HOME/ableton-mcp"
+cd "$HOME/ableton-mcp"
+uv sync --locked
+uv run --locked ableton-mcp-install-script
+```
+
+Restart Live and open **Settings → Tempo & MIDI** (called **Link, Tempo & MIDI** in some versions). Set an unused **Control Surface** row to **AbletonMCP**, with **Input** and **Output** both **None**. Open a blank Live Set for the first run.
+
+### Codex on the same computer
+
+Register the default `stdio` server from a terminal:
+
+```bash
+codex mcp add ableton \
+  --env ABLETON_MCP_DISABLE_TELEMETRY=1 \
+  --env ABLETON_MCP_DISABLE_DATASET=1 \
+  -- "$(command -v uv)" run --locked --directory "$HOME/ableton-mcp" ableton-mcp
+codex mcp get ableton
+```
+
+Open a new local Codex session. Restart the desktop app if the server list is stale. Ask it to use `ableton.get_session_info` to report the current tempo and number of tracks. Check the result against Live. Review write-tool requests before approving them. See [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
+
+### ChatGPT web via Secure MCP Tunnel
+
+Run the HTTP server in a terminal and leave it open:
+
+```bash
+cd "$HOME/ableton-mcp"
+uv run --locked ableton-mcp --transport streamable-http
+```
+
+The MCP endpoint is `http://127.0.0.1:8765/mcp`. Use `--port` if 8765 is busy and update the tunnel profile accordingly. Both this endpoint and Live's raw control socket on port 9877 should stay on loopback. The HTTP server relies on the private tunnel and its workspace permissions for remote access. HTTP mode disables upstream telemetry and dataset recording and omits consent, dataset feedback, and local audio file import tools.
+
+1. In [Platform tunnel settings](https://platform.openai.com/settings/organization/tunnels), create a tunnel associated with the ChatGPT workspace. Use a restricted runtime key with Tunnels Read and Use. The person creating it needs Tunnels Read and Manage.
+2. Install the official `tunnel-client` for your Mac. In a second terminal, make `CONTROL_PLANE_API_KEY` available to that process via a secure local input. Configure the `sample_mcp_remote_no_auth` profile with `--mcp-server-url http://127.0.0.1:8765/mcp` and your tunnel ID.
+3. Run `tunnel-client doctor --profile ableton-live --explain`, then `tunnel-client run --profile ableton-live`, using the same profile name you chose at setup.
+4. In [ChatGPT Plugins](https://chatgpt.com/plugins), use **Add custom MCP server → Tunnel** and select that tunnel. Install your plugin and use it in a new chat. Start with a read request, then approve a small edit in the blank Set and verify it in Live.
+
+See the [Secure MCP Tunnel guide](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [tunnel-client onboarding](https://github.com/openai/tunnel-client/blob/master/docs/onboarding.md), and [ChatGPT custom MCP guide](https://developers.openai.com/api/docs/guides/custom-mcp-server) for account access and setup. The Mac, Live, the HTTP server, and `tunnel-client` must all be available while ChatGPT uses the plugin. Stop the two terminal processes with **Control+C** when finished.
 
 ---
 
@@ -130,8 +180,8 @@ The system consists of two main components:
 
 ### Prerequisites
 
-- **Ableton Live** 10 or newer
-- **Python** 3.8 or newer
+- **Ableton Live** 11 or 12
+- **Python** 3.10 or newer for the MCP server (managed by `uv`)
 - **uv** package manager
 
 If you're on Mac, please install uv as:
