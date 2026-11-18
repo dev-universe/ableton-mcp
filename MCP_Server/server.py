@@ -1,5 +1,8 @@
 # ableton_mcp_server.py
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.types import ToolAnnotations
+import argparse
+import asyncio
 import socket
 import json
 import logging
@@ -195,7 +198,7 @@ class AbletonConnection:
             raise Exception(f"Communication error with Ableton: {str(e)}")
 
 @asynccontextmanager
-async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
+async def server_lifespan() -> AsyncIterator[None]:
     """Manage server startup and shutdown lifecycle"""
     try:
         logger.info("AbletonMCP server starting up")
@@ -206,13 +209,12 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
         except Exception as e:
             logger.debug(f"Failed to record startup telemetry: {e}")
 
-        script_info = None
         try:
             ableton = get_ableton_connection()
             logger.info("Successfully connected to Ableton on startup")
             from .script_handshake import handshake
 
-            script_info = handshake(ableton.send_command)
+            handshake(ableton.send_command)
         except Exception as e:
             logger.warning(f"Could not connect to Ableton on startup: {str(e)}")
             logger.warning("Make sure the Ableton Remote Script is running")
@@ -254,7 +256,7 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
                 reason = "MCP_Server/config.py missing or unreadable (gitignored; required for Supabase)"
             logger.info("Dataset recording off — %s", reason)
 
-        yield {"script_info": script_info}
+        yield
     finally:
         global _ableton_connection
         try:
@@ -279,11 +281,13 @@ async def server_lifespan(server: FastMCP) -> AsyncIterator[Dict[str, Any]]:
             logger.debug(f"Failed to end dataset session: {e}")
         logger.info("AbletonMCP server shut down")
 
-# Create the MCP server with lifespan support
 mcp = FastMCP(
     "AbletonMCP",
-    lifespan=server_lifespan
+    host="127.0.0.1",
+    stateless_http=True,
+    json_response=True,
 )
+READ_ONLY = ToolAnnotations(readOnlyHint=True)
 
 # Global connection for resources
 _ableton_connection = None
@@ -414,7 +418,7 @@ def set_dataset_consent(ctx: Context, consent: bool, user_said: str = "") -> str
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @telemetry_tool("get_session_info")
 @trajectory_tool("get_session_info")
 def get_session_info(ctx: Context, user_prompt: str = "") -> str:
@@ -432,7 +436,7 @@ def get_session_info(ctx: Context, user_prompt: str = "") -> str:
         return f"Error getting session info: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @telemetry_tool("get_remote_script_info")
 @trajectory_tool("get_remote_script_info", modifying=False)
 def get_remote_script_info(ctx: Context, user_prompt: str = "") -> str:
@@ -454,7 +458,7 @@ def get_remote_script_info(ctx: Context, user_prompt: str = "") -> str:
         logger.error(f"Error getting remote script info: {str(e)}")
         return f"Error getting remote script info: {str(e)}"
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @telemetry_tool("get_track_info")
 @trajectory_tool("get_track_info")
 def get_track_info(ctx: Context, track_index: int, user_prompt: str = "") -> str:
@@ -474,7 +478,7 @@ def get_track_info(ctx: Context, track_index: int, user_prompt: str = "") -> str
         return f"Error getting track info: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @telemetry_tool("get_clip_notes")
 @trajectory_tool("get_clip_notes")
 def get_clip_notes(
@@ -510,7 +514,7 @@ def get_clip_notes(
         return f"Error getting clip notes: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @telemetry_tool("get_device_parameters")
 @trajectory_tool("get_device_parameters")
 def get_device_parameters(
@@ -582,7 +586,7 @@ def set_device_parameter(
         return f"Error setting device parameter: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @telemetry_tool("get_session_snapshot")
 @trajectory_tool("get_session_snapshot")
 def get_session_snapshot(
@@ -1031,7 +1035,7 @@ def stop_playback(ctx: Context, user_prompt: str = "") -> str:
         logger.error(f"Error stopping playback: {str(e)}")
         return f"Error stopping playback: {str(e)}"
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @rich_telemetry_tool("get_browser_tree")
 @trajectory_tool("get_browser_tree")
 def get_browser_tree(ctx: Context, category_type: str = "all", user_prompt: str = "") -> str:
@@ -1097,7 +1101,7 @@ def get_browser_tree(ctx: Context, category_type: str = "all", user_prompt: str 
             logger.error(f"Error getting browser tree: {error_msg}")
             return f"Error getting browser tree: {error_msg}"
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @rich_telemetry_tool("get_browser_items_at_path")
 @trajectory_tool("get_browser_items_at_path")
 def get_browser_items_at_path(ctx: Context, path: str, user_prompt: str = "") -> str:
@@ -1233,7 +1237,7 @@ def set_arrangement_time(ctx: Context, time: float, user_prompt: str = "") -> st
         return f"Error setting arrangement time: {str(e)}"
 
 
-@mcp.tool()
+@mcp.tool(annotations=READ_ONLY)
 @telemetry_tool("get_arrangement_clips")
 @trajectory_tool("get_arrangement_clips")
 def get_arrangement_clips(ctx: Context, track_index: int, user_prompt: str = "") -> str:
@@ -1557,10 +1561,41 @@ def record_audition(
 
 
 
-# Main execution
-def main():
-    """Run the MCP server"""
-    mcp.run()
+async def run_server(transport: str) -> None:
+    # Stateless HTTP opens a protocol session per request. Keep one Live connection per process.
+    async with server_lifespan():
+        if transport == "streamable-http":
+            await mcp.run_streamable_http_async()
+        else:
+            await mcp.run_stdio_async()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run the Ableton Live MCP server")
+    parser.add_argument("--transport", choices=("stdio", "streamable-http"), default="stdio")
+    parser.add_argument("--port", type=int, default=8765, help="Loopback HTTP port (default: 8765)")
+    args = parser.parse_args(argv)
+
+    if args.transport == "streamable-http":
+        if not 1 <= args.port <= 65535:
+            parser.error("--port must be between 1 and 65535")
+        mcp.settings.port = args.port
+
+        # A remote chat should not change machine-wide consent or import a local file by path.
+        os.environ["ABLETON_MCP_DISABLE_TELEMETRY"] = "1"
+        os.environ["ABLETON_MCP_DISABLE_DATASET"] = "1"
+        for tool in (
+            "create_audio_clip", "set_dataset_consent", "submit_intent", "rate_last_action",
+            "prefer_candidate", "reject_last_action", "record_audition",
+        ):
+            mcp.remove_tool(tool)
+
+    try:
+        asyncio.run(run_server(args.transport))
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

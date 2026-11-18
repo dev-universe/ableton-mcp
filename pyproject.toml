@@ -14,7 +14,7 @@ classifiers = [
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "mcp[cli]>=1.9.0,<2.0.0",
+    "mcp[cli]>=1.29.0,<2.0.0",
     "supabase>=2.0.0",
 ]
 

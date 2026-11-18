@@ -12,7 +12,7 @@ resolution-markers = [
 
 [[package]]
 name = "ableton-mcp"
-version = "1.4.0"
+version = "1.4.5"
 source = { editable = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },
@@ -21,7 +21,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "mcp", extras = ["cli"], specifier = ">=1.9.0,<2.0.0" },
+    { name = "mcp", extras = ["cli"], specifier = ">=1.29.0,<2.0.0" },
     { name = "supabase", specifier = ">=2.0.0" },
 ]
 
