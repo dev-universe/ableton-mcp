@@ -1,14 +1,5 @@
 """Regression tests for the Live-side Remote Script's TCP surface.
 
-Each test pins a defect this change fixes:
-
-* the socket bound every interface, exposing an unauthenticated command
-  surface to the whole network,
-* each recv() chunk was decoded on its own, so a multi-byte UTF-8 character
-  split across a chunk boundary desynchronised the connection,
-* an incomplete command grew the buffer without bound,
-* get_browser_tree never recursed and never reported a folder count.
-
 The script normally runs inside Live's interpreter, so ``_Framework`` is
 stubbed and the class is instantiated without ``__init__`` (which would open a
 socket). No Ableton, no network.
@@ -234,3 +225,132 @@ def test_browser_tree_caps_a_huge_folder_and_flags_it(script_module):
 
     assert len(category["children"]) == 64
     assert category["has_more"] is True
+
+
+def _layout_instance(script_module, tracks=(), returns=()):
+    inst = make_instance(script_module)
+    inst._song = types.SimpleNamespace(tracks=tracks, return_tracks=returns)
+    inst.schedule_message = lambda delay, task: task()
+    return inst
+
+
+def test_routing_uses_live_choices_and_refuses_ambiguous_names(script_module):
+    main = types.SimpleNamespace(display_name="Main")
+    bus = types.SimpleNamespace(display_name="Bus")
+    duplicate_bus = types.SimpleNamespace(display_name="Bus")
+    blank = types.SimpleNamespace(display_name="")
+    track = types.SimpleNamespace(
+        name="Source", output_routing_type=main, output_routing_channel=blank,
+        available_output_routing_types=[main, bus, duplicate_bus],
+        available_output_routing_channels=[blank],
+    )
+    inst = _layout_instance(script_module, tracks=[track])
+    target = {"track_index": 0, "direction": "output"}
+    command = {"type": "set_track_routing", "params": dict(target, selector="type", choice="Bus")}
+
+    rejected = inst._process_command(command)
+    assert rejected["status"] == "error"
+    assert track.output_routing_type is main
+
+    track.available_output_routing_types.pop()
+    changed = inst._process_command(command)
+    assert changed["status"] == "success"
+    assert track.output_routing_type is bus
+    assert changed["result"]["type"] == "Bus"
+    assert changed["result"]["channel"] is None
+    assert changed["result"]["available_channels"] == []
+
+
+def test_delete_return_checks_current_unique_name_and_index(script_module):
+    returns = [types.SimpleNamespace(name="Reverb"), types.SimpleNamespace(name="Delay")]
+    inst = _layout_instance(script_module, returns=returns)
+    inst._song.delete_return_track = returns.pop
+
+    def delete(index, expected_name):
+        return inst._process_command({
+            "type": "delete_return_track",
+            "params": {"return_index": index, "expected_name": expected_name},
+        })
+
+    assert delete(-1, "Delay")["status"] == "error"
+    assert delete(0, "Delay")["status"] == "error"
+    returns[1].name = "Reverb"
+    assert delete(0, "Reverb")["status"] == "error"
+    assert len(returns) == 2
+    returns[1].name = "Delay"
+    assert delete(0, "Reverb")["result"]["deleted_name"] == "Reverb"
+    assert [track.name for track in returns] == ["Delay"]
+
+
+def test_create_return_removes_it_if_live_rejects_name(script_module):
+    class UnnameableReturn:
+        @property
+        def name(self):
+            return "New Return"
+
+        @name.setter
+        def name(self, _name):
+            raise RuntimeError("Live rejected the name")
+
+    original = types.SimpleNamespace(name="Reverb")
+    returns = [original]
+    inst = _layout_instance(script_module, returns=returns)
+    inst._song.create_return_track = lambda: returns.append(UnnameableReturn())
+    inst._song.delete_return_track = returns.pop
+
+    rejected = inst._process_command({
+        "type": "create_return_track", "params": {"name": "Delay"},
+    })
+
+    assert rejected == {"status": "error", "result": {}, "message": "Live rejected the name"}
+    assert returns == [original]
+
+
+def test_create_return_rejects_repeat_with_live_letter_prefix(script_module):
+    returns = [types.SimpleNamespace(name="A-Practice FX")]
+    inst = _layout_instance(script_module, returns=returns)
+    inst._song.create_return_track = lambda: pytest.fail("Return creation must be refused")
+
+    rejected = inst._process_command({
+        "type": "create_return_track", "params": {"name": "Practice FX"},
+    })
+
+    assert rejected["status"] == "error"
+    assert "already exists" in rejected["message"]
+
+
+def test_set_send_maps_percent_to_live_range_and_refuses_invalid_values(script_module):
+    send = types.SimpleNamespace(min=0.2, max=0.8, value=0.2, is_enabled=True)
+    other_send = types.SimpleNamespace(value=0.1)
+    track = types.SimpleNamespace(
+        name="Source", mixer_device=types.SimpleNamespace(sends=[other_send, send]),
+    )
+    returns = [types.SimpleNamespace(name="Reverb"), types.SimpleNamespace(name="Delay")]
+    inst = _layout_instance(script_module, tracks=[track], returns=returns)
+
+    def set_send(percent, expected_return_name=None):
+        return inst._process_command({
+            "type": "set_track_send",
+            "params": {
+                "track_index": 0,
+                "return_index": 1,
+                "percent": percent,
+                "expected_return_name": expected_return_name,
+            },
+        })
+
+    assert set_send(float("nan"))["status"] == "error"
+    assert set_send(101)["status"] == "error"
+    assert set_send(50, "Reverb")["status"] == "error"
+    assert send.value == 0.2
+
+    changed = set_send(50, "Delay")
+    assert changed["status"] == "success"
+    assert changed["result"]["percent"] == pytest.approx(50)
+    assert changed["result"]["return_name"] == "Delay"
+    assert send.value == pytest.approx(0.5)
+    assert other_send.value == 0.1
+
+    send.is_enabled = False
+    assert set_send(0)["status"] == "error"
+    assert send.value == pytest.approx(0.5)

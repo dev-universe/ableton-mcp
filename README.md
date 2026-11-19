@@ -156,6 +156,17 @@ codex mcp get ableton
 
 Open a new local Codex session. Restart the desktop app if the server list is stale. Ask it to use `ableton.get_session_info` to report the current tempo and number of tracks. Check the result against Live. Review write-tool requests before approving them. See [Codex MCP configuration](https://learn.chatgpt.com/docs/extend/mcp?surface=cli).
 
+### Organize tracks in a Live Set
+
+These tools require the bundled Remote Script 1.8.0 or later. If you already installed the fork, update your checkout, run `uv run --locked ableton-mcp-install-script`, then reopen Live and start a new local chat in the ChatGPT desktop app.
+
+- Use `get_track_layout` to read track colors, Return tracks, and Sends. Regular tracks and Returns have separate indices.
+- Use `set_track_name` to rename a regular track and `set_track_color` to color a regular or Return track. Live applies the closest color in its palette.
+- Use `get_track_routing` before `set_track_routing`. Set the input or output type first, then choose a channel from the refreshed options. Return tracks support output routing.
+- Use `create_return_track`, `set_return_track_name`, and `delete_return_track` to manage Returns. Deleting requires the current Return name and index. `set_track_send` sets a regular track's Send to 0–100% of the Live parameter range.
+
+Try this in a blank Set. “Read my track layout. Rename the first audio track to `01 Source` and give it a red color. Create a Return named `Practice FX`, set that track's Send to it to 25%, then read back the changes. Keep playback stopped.”
+
 ### ChatGPT web via Secure MCP Tunnel
 
 Run the HTTP server in a terminal and leave it open:
