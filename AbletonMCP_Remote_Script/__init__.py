@@ -5,6 +5,7 @@ from _Framework.ControlSurface import ControlSurface
 import os
 import socket
 import json
+import re
 import threading
 import time
 import traceback
@@ -34,8 +35,19 @@ MAX_REQUEST_BYTES = 16 * 1024 * 1024
 
 # Bumped whenever the TCP command surface changes; the MCP server compares
 # this to EXPECTED_REMOTE_SCRIPT_VERSION.
-SCRIPT_VERSION = "1.7.1"
+SCRIPT_VERSION = "1.8.0"
 PROTOCOL_VERSION = 1
+
+TRACK_LAYOUT_HANDLERS = {
+    "get_track_layout": "_get_track_layout",
+    "get_track_routing": "_get_track_routing",
+    "set_track_color": "_set_track_color",
+    "set_track_routing": "_set_track_routing",
+    "create_return_track": "_create_return_track",
+    "set_return_track_name": "_set_return_track_name",
+    "delete_return_track": "_delete_return_track",
+    "set_track_send": "_set_track_send",
+}
 
 SCRIPT_CAPABILITIES = [
     "get_session_info",
@@ -57,7 +69,7 @@ SCRIPT_CAPABILITIES = [
     "create_locator",
     "delete_clip",
     "clear_notes_from_clip",
-]
+] + list(TRACK_LAYOUT_HANDLERS)
 
 def create_instance(c_instance):
     """Create and return the AbletonMCP script instance"""
@@ -288,7 +300,8 @@ class AbletonMCP(ControlSurface):
                 track_index = params.get("track_index", 0)
                 response["result"] = self._get_track_info(track_index)
             # Commands that modify Live's state should be scheduled on the main thread
-            elif command_type in ["create_midi_track", "create_audio_track", "set_track_name",
+            elif command_type in TRACK_LAYOUT_HANDLERS or command_type in [
+                                 "create_midi_track", "create_audio_track", "set_track_name",
                                  "create_clip", "create_audio_clip", "add_notes_to_clip", "set_clip_name",
                                  "set_arrangement_clip_name",
                                  "delete_clip",
@@ -308,7 +321,10 @@ class AbletonMCP(ControlSurface):
                 def main_thread_task():
                     try:
                         result = None
-                        if command_type == "create_midi_track":
+                        if command_type in TRACK_LAYOUT_HANDLERS:
+                            handler = getattr(self, TRACK_LAYOUT_HANDLERS[command_type])
+                            result = handler(**params)
+                        elif command_type == "create_midi_track":
                             index = params.get("index", -1)
                             result = self._create_midi_track(index)
                         elif command_type == "create_audio_track":
@@ -694,6 +710,176 @@ class AbletonMCP(ControlSurface):
             self.log_message("Error setting track name: " + str(e))
             raise
     
+    def _layout_track(self, track_index, track_kind):
+        if track_kind == "track":
+            tracks = self._song.tracks
+        elif track_kind == "return":
+            tracks = self._song.return_tracks
+        else:
+            raise ValueError("track_kind must be 'track' or 'return'")
+        if type(track_index) is not int or not 0 <= track_index < len(tracks):
+            raise IndexError("%s index out of range: %s" % (track_kind, track_index))
+        return tracks[track_index]
+
+    def _layout_track_info(self, track, index):
+        return {
+            "index": index,
+            "name": track.name,
+            "color": "#%06X" % (int(track.color) & 0xFFFFFF),
+            "color_index": int(track.color_index),
+        }
+
+    def _layout_send_info(self, send, return_index, return_name):
+        minimum = float(send.min)
+        maximum = float(send.max)
+        value = float(send.value)
+        display = "-inf dB" if value == minimum else self._safe_attr(send, "display_value", str)
+        if display is None:
+            try:
+                display = str(send.str_for_value(value))
+            except (AttributeError, RuntimeError, TypeError, ValueError):
+                pass
+        return {
+            "return_index": return_index,
+            "return_name": return_name,
+            "value": value,
+            "min": minimum,
+            "max": maximum,
+            "percent": (value - minimum) * 100.0 / (maximum - minimum) if maximum > minimum else None,
+            "display_value": display,
+            "is_enabled": bool(send.is_enabled),
+        }
+
+    def _get_track_layout(self):
+        returns = list(self._song.return_tracks)
+        tracks = []
+        for index, track in enumerate(self._song.tracks):
+            info = self._layout_track_info(track, index)
+            info["sends"] = [
+                self._layout_send_info(send, return_index, target.name)
+                for return_index, (send, target) in enumerate(zip(track.mixer_device.sends, returns))
+            ]
+            tracks.append(info)
+        return {
+            "tracks": tracks,
+            "return_tracks": [
+                self._layout_track_info(track, index) for index, track in enumerate(returns)
+            ],
+        }
+
+    def _routing_track(self, track_index, direction, track_kind):
+        if direction not in ("input", "output"):
+            raise ValueError("direction must be 'input' or 'output'")
+        if track_kind == "return" and direction == "input":
+            raise ValueError("Return tracks receive their input through Sends")
+        return self._layout_track(track_index, track_kind)
+
+    def _routing_state(self, track, track_index, track_kind, direction):
+        state = {
+            "track_index": track_index,
+            "track_kind": track_kind,
+            "track_name": track.name,
+            "direction": direction,
+        }
+        for selector in ("type", "channel"):
+            property_name = direction + "_routing_" + selector
+            current = getattr(track, property_name)
+            options = getattr(track, "available_" + property_name + "s")
+            state[selector] = (current.display_name or None) if current is not None else None
+            state["available_" + selector + "s"] = [
+                option.display_name for option in options if option.display_name
+            ]
+        return state
+
+    def _get_track_routing(self, track_index, direction, track_kind="track"):
+        track = self._routing_track(track_index, direction, track_kind)
+        return self._routing_state(track, track_index, track_kind, direction)
+
+    def _set_track_routing(self, track_index, direction, selector, choice, track_kind="track"):
+        track = self._routing_track(track_index, direction, track_kind)
+        if selector not in ("type", "channel"):
+            raise ValueError("selector must be 'type' or 'channel'")
+        property_name = direction + "_routing_" + selector
+        options = [
+            option for option in getattr(track, "available_" + property_name + "s")
+            if option.display_name
+        ]
+        matches = [option for option in options if option.display_name == choice]
+        if len(matches) != 1:
+            names = [option.display_name for option in options]
+            raise ValueError("Routing option %r must match exactly one value in %r" % (choice, names))
+        current = getattr(track, property_name)
+        if current is None or current.display_name != choice:
+            setattr(track, property_name, matches[0])
+        return self._routing_state(track, track_index, track_kind, direction)
+
+    def _set_track_color(self, track_index, color, track_kind="track"):
+        track = self._layout_track(track_index, track_kind)
+        if not isinstance(color, type("")) or not re.match(r"#[0-9a-fA-F]{6}\Z", color):
+            raise ValueError("color must use '#RRGGBB' format")
+        track.color = int(color[1:], 16)
+        return self._layout_track_info(track, track_index)
+
+    def _return_name(self, name):
+        if not isinstance(name, type("")) or not name.strip():
+            raise ValueError("Return track name must not be blank")
+        return name.strip()
+
+    def _create_return_track(self, name):
+        name = self._return_name(name)
+        returns = self._song.return_tracks
+        for return_index, track in enumerate(returns):
+            prefix = chr(ord("A") + return_index) + "-"
+            if track.name in (name, prefix + name):
+                raise ValueError("A Return track named %r already exists" % name)
+        index = len(returns)
+        self._song.create_return_track()
+        track = self._song.return_tracks[index]
+        try:
+            track.name = name
+        except Exception as naming_error:
+            try:
+                self._song.delete_return_track(index)
+            except Exception as cleanup_error:
+                raise RuntimeError(
+                    "Could not name the new Return (%s) or remove it (%s). Read the layout before retrying."
+                    % (naming_error, cleanup_error)
+                )
+            raise
+        return self._layout_track_info(track, index)
+
+    def _set_return_track_name(self, return_index, name):
+        track = self._layout_track(return_index, "return")
+        track.name = self._return_name(name)
+        return self._layout_track_info(track, return_index)
+
+    def _delete_return_track(self, return_index, expected_name):
+        track = self._layout_track(return_index, "return")
+        if track.name != expected_name:
+            raise ValueError("Return name changed. Read the layout again before deleting.")
+        if sum(item.name == expected_name for item in self._song.return_tracks) != 1:
+            raise ValueError("Return name is ambiguous. Rename the target before deleting.")
+        self._song.delete_return_track(return_index)
+        return {"deleted_index": return_index, "deleted_name": expected_name}
+
+    def _set_track_send(self, track_index, return_index, percent, expected_return_name=None):
+        source = self._layout_track(track_index, "track")
+        target = self._layout_track(return_index, "return")
+        if expected_return_name is not None and target.name != expected_return_name:
+            raise ValueError("Return name changed. Read the layout again before setting the Send.")
+        if isinstance(percent, bool) or not isinstance(percent, (int, float)) or not 0 <= percent <= 100:
+            raise ValueError("percent must be a number between 0 and 100")
+        sends = source.mixer_device.sends
+        if return_index >= len(sends) or not sends[return_index].is_enabled:
+            raise ValueError("Send from %r to %r is unavailable" % (source.name, target.name))
+        send = sends[return_index]
+        minimum = float(send.min)
+        maximum = float(send.max)
+        send.value = minimum + (maximum - minimum) * (percent / 100.0)
+        result = self._layout_send_info(send, return_index, target.name)
+        result.update(track_index=track_index, track_name=source.name)
+        return result
+
     def _create_clip(self, track_index, clip_index, length):
         """Create a new MIDI clip in the specified track and clip slot"""
         try:

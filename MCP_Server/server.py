@@ -1,6 +1,8 @@
 # ableton_mcp_server.py
 from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.fastmcp.exceptions import ToolError
 from mcp.types import ToolAnnotations
+from pydantic import Field
 import argparse
 import asyncio
 import socket
@@ -10,7 +12,7 @@ import os
 import threading
 from dataclasses import dataclass, field
 from contextlib import asynccontextmanager
-from typing import AsyncIterator, Dict, Any, List, Union
+from typing import Annotated, AsyncIterator, Dict, Any, List, Literal, Union
 
 from .telemetry import record_startup
 from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
@@ -134,6 +136,8 @@ class AbletonConnection:
         # Check if this is a state-modifying command
         is_modifying_command = command_type in [
             "create_midi_track", "create_audio_track", "set_track_name",
+            "set_track_color", "set_track_routing", "set_track_send",
+            "create_return_track", "set_return_track_name", "delete_return_track",
             "create_clip", "create_audio_clip", "add_notes_to_clip", "set_clip_name",
             "delete_clip",
             "clear_notes_from_clip",
@@ -288,6 +292,10 @@ mcp = FastMCP(
     json_response=True,
 )
 READ_ONLY = ToolAnnotations(readOnlyHint=True)
+MIXER_UPDATE = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True)
+TrackIndex = Annotated[int, Field(ge=0, strict=True)]
+TrackKind = Literal["track", "return"]
+RoutingDirection = Literal["input", "output"]
 
 # Global connection for resources
 _ableton_connection = None
@@ -689,6 +697,130 @@ def set_track_name(ctx: Context, track_index: int, name: str, user_prompt: str =
     except Exception as e:
         logger.error(f"Error setting track name: {str(e)}")
         return f"Error setting track name: {str(e)}"
+
+def _track_layout_command(command: str, **params: Any) -> dict[str, Any]:
+    try:
+        return get_ableton_connection().send_command(command, params)
+    except Exception as exc:
+        if f"Unknown command: {command}" in str(exc):
+            raise ToolError(
+                "The Ableton Remote Script does not support this tool. "
+                "Run ableton-mcp-install-script with the updated package and restart Ableton Live."
+            ) from exc
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_track_layout() -> dict[str, Any]:
+    """List normal and Return tracks, their names and colors, and normal tracks' Sends.
+
+    The two track lists use separate zero-based indices. Each Send includes its
+    destination Return index and name, current parameter value, percentage of the
+    parameter range, and Live's display value when available.
+    """
+    return _track_layout_command("get_track_layout")
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_track_routing(
+    track_index: TrackIndex,
+    direction: RoutingDirection,
+    track_kind: TrackKind = "track",
+) -> dict[str, Any]:
+    """Read a track's input or output selectors and the exact choices Live offers.
+
+    Use get_track_layout to find the index. Return tracks support output routing.
+    Channel choices depend on the current routing type and may be empty.
+    """
+    return _track_layout_command(
+        "get_track_routing", track_index=track_index, direction=direction, track_kind=track_kind,
+    )
+
+
+@mcp.tool(annotations=MIXER_UPDATE)
+def set_track_color(
+    track_index: TrackIndex,
+    color: Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")],
+    track_kind: TrackKind = "track",
+) -> dict[str, Any]:
+    """Set a normal or Return track's color using #RRGGBB, such as #3366FF.
+
+    Use get_track_layout to find the index. Live selects the closest palette
+    color. The response reports the color Live actually applied.
+    """
+    return _track_layout_command(
+        "set_track_color", track_index=track_index, color=color, track_kind=track_kind,
+    )
+
+
+@mcp.tool(annotations=MIXER_UPDATE)
+def set_track_routing(
+    track_index: TrackIndex,
+    direction: RoutingDirection,
+    selector: Literal["type", "channel"],
+    choice: str,
+    track_kind: TrackKind = "track",
+) -> dict[str, Any]:
+    """Set one input or output routing selector on a track.
+
+    Read get_track_routing first and pass an exact choice from Live's list.
+    For both type and channel, set the type first and use the returned channel
+    choices. Duplicate choice names are ambiguous. Return tracks support output routing.
+    """
+    return _track_layout_command(
+        "set_track_routing", track_index=track_index, direction=direction,
+        selector=selector, choice=choice, track_kind=track_kind,
+    )
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+def create_return_track(name: str) -> dict[str, Any]:
+    """Add an empty Return track at the end of Live's Return tracks and name it.
+
+    A Return with the same name is refused. Read the layout before retrying an
+    interrupted request.
+    """
+    return _track_layout_command("create_return_track", name=name)
+
+
+@mcp.tool(annotations=MIXER_UPDATE)
+def set_return_track_name(return_index: TrackIndex, name: str) -> dict[str, Any]:
+    """Rename a Return track. Read its index from get_track_layout."""
+    return _track_layout_command("set_return_track_name", return_index=return_index, name=name)
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+def delete_return_track(return_index: TrackIndex, expected_name: str) -> dict[str, Any]:
+    """Delete a Return track, its devices and the corresponding Sends.
+
+    Use only when the user asks to delete that Return. Read get_track_layout
+    first and supply the current exact name and index. An ambiguous or stale
+    name is refused. Refresh the layout after deletion because indices can shift.
+    """
+    return _track_layout_command(
+        "delete_return_track", return_index=return_index, expected_name=expected_name,
+    )
+
+
+@mcp.tool(annotations=MIXER_UPDATE)
+def set_track_send(
+    track_index: TrackIndex,
+    return_index: TrackIndex,
+    percent: Annotated[float, Field(ge=0, le=100, strict=True, allow_inf_nan=False)],
+    expected_return_name: str | None = None,
+) -> dict[str, Any]:
+    """Set a normal track's Send to a Return by percentage of Live's parameter range.
+
+    Use get_track_layout to find the source track and destination Return indices.
+    Pass the destination's current name to guard against a stale Return index.
+    0 is the minimum and 100 is the maximum. Read the returned display value
+    for the level shown in Live. Percentage specifies the parameter range, not dB.
+    """
+    return _track_layout_command(
+        "set_track_send", track_index=track_index, return_index=return_index, percent=percent,
+        expected_return_name=expected_return_name,
+    )
+
 
 @mcp.tool()
 @rich_telemetry_tool("create_clip")
