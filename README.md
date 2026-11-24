@@ -167,6 +167,23 @@ These tools require the bundled Remote Script 1.8.0 or later. If you already ins
 
 Try this in a blank Set. “Read my track layout. Rename the first audio track to `01 Source` and give it a red color. Create a Return named `Practice FX`, set that track's Send to it to 25%, then read back the changes. Keep playback stopped.”
 
+### Use Serum 2 and Serum 2 FX
+
+Install Serum 2, enable the VST3 or Audio Units source in Live's Plug-Ins
+settings, and rescan. `list_serum_plugins` shows the entries Live can load.
+See the [Serum 2 host interface observations](docs/serum-2-host-interface.md).
+
+Use `get_track_layout` to find the current index of a regular track. Call
+`load_serum_plugin` with `variant="instrument"` for Serum 2 on a MIDI track,
+or `variant="fx"` for Serum 2 FX on an audio track or after an instrument.
+Choose `plugin_format="vst3"` or `"au"`, or leave `"auto"` to prefer VST3.
+Check `get_track_info` for the resulting device chain before retrying a load.
+
+To adjust a plug-in control, add it to the device panel with Live's
+**Configure** mode. Use `get_device_parameters` to find its current index,
+value, and range, then pass that index and a value to `set_device_parameter`.
+Parameter assignments belong to each instance. [Ableton Live manual](https://www.ableton.com/en/live-manual/12/using-plug-ins/).
+
 ### ChatGPT web via Secure MCP Tunnel
 
 Run the HTTP server in a terminal and leave it open:

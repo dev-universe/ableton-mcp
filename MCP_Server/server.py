@@ -1022,6 +1022,98 @@ def set_tempo(ctx: Context, tempo: float, user_prompt: str = "") -> str:
         return f"Error setting tempo: {str(e)}"
 
 
+SERUM_VARIANTS = {"instrument": "Serum 2", "fx": "Serum 2 FX"}
+SERUM_BROWSER_PATHS = {
+    "vst3": "plugins/VST3/Xfer Records",
+    "au": "plugins/AUv2/Xfer Records",
+}
+
+
+def _serum_browser_items(ableton: AbletonConnection, plugin_format: str) -> list[dict[str, str]]:
+    path = SERUM_BROWSER_PATHS[plugin_format]
+    result = ableton.send_command("get_browser_items_at_path", {"path": path})
+    error = result.get("error")
+    if error:
+        if error in {
+            "Unknown or unavailable category: plugins",
+            f"Path part '{path.split('/')[1]}' not found",
+            "Path part 'Xfer Records' not found",
+        }:
+            return []
+        raise ToolError(f"Could not read Live's {plugin_format} browser: {error}")
+
+    matches = []
+    for item in result["items"]:
+        uri = item.get("uri")
+        if (
+            item.get("name") in SERUM_VARIANTS.values()
+            and item.get("is_loadable")
+            and isinstance(uri, str)
+            and uri.strip()
+        ):
+            matches.append({"name": item["name"], "format": plugin_format, "uri": uri})
+    return matches
+
+
+@mcp.tool(annotations=READ_ONLY)
+def list_serum_plugins() -> dict[str, list[dict[str, str]]]:
+    """List the Serum 2 and Serum 2 FX entries Live can load, with format and browser URI."""
+    ableton = get_ableton_connection()
+    return {
+        "plugins": [
+            item
+            for plugin_format in SERUM_BROWSER_PATHS
+            for item in _serum_browser_items(ableton, plugin_format)
+        ]
+    }
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+def load_serum_plugin(
+    track_index: TrackIndex,
+    variant: Literal["instrument", "fx"],
+    plugin_format: Literal["auto", "vst3", "au"] = "auto",
+) -> dict[str, Any]:
+    """Ask Live to load Serum 2 on a MIDI track or Serum 2 FX in an audio signal chain.
+
+    Find the current regular track index with get_track_layout. Auto prefers VST3 and
+    uses AU only if Live cannot find the requested VST3 entry. Read get_track_info
+    after the request to check the device chain, especially before retrying a failure.
+    """
+    ableton = get_ableton_connection()
+    name = SERUM_VARIANTS[variant]
+    formats = SERUM_BROWSER_PATHS if plugin_format == "auto" else (plugin_format,)
+    for candidate in formats:
+        matches = [item for item in _serum_browser_items(ableton, candidate) if item["name"] == name]
+        if not matches:
+            continue
+        if len(matches) > 1:
+            raise ToolError(f"Live reports multiple loadable {candidate} entries named {name}.")
+        if variant == "instrument":
+            track = ableton.send_command("get_track_info", {"track_index": track_index})
+            if not track.get("is_midi_track"):
+                raise ToolError("Serum 2 requires a MIDI track. Use variant='fx' for Serum 2 FX.")
+
+        plugin = matches[0]
+        try:
+            result = ableton.send_command(
+                "load_browser_item", {"track_index": track_index, "item_uri": plugin["uri"]}
+            )
+        except Exception as exc:
+            raise ToolError(
+                f"Could not confirm Live accepted the load request for {name}. "
+                f"Check the device chain before retrying. {exc}"
+            ) from exc
+        if result.get("loaded") is not True:
+            raise ToolError(f"Live did not acknowledge the load request for {name}.")
+        return {**plugin, "track_index": track_index, "status": "load_requested"}
+
+    raise ToolError(
+        f"{name} is unavailable in Live for format '{plugin_format}'. "
+        "Enable the plug-in source in Live and rescan."
+    )
+
+
 @mcp.tool()
 @rich_telemetry_tool("load_instrument_or_effect")
 @trajectory_tool("load_instrument_or_effect")
