@@ -25,6 +25,7 @@ from .serum_presets import (
     LIVE_PRESET_BROWSER, LIVE_PRESET_FOLDER, LiveFormat, PresetDetails, check_live_preset,
     export_live_preset, export_preset, import_preset,
 )
+from .serum_render import Audition, render_audio
 from .serum_state import SUPPORTED_BUILD, SerumError, Variant, initial_state
 
 ABLETON_HOST = os.environ.get("ABLETON_HOST", "localhost")
@@ -1164,6 +1165,24 @@ def load_serum_live_preset(
         raise ToolError(f"Live did not acknowledge the load request for {filename!r}. Check the device chain before retrying.")
     return {"variant": variant, "track_index": track_index, "filename": filename,
             "format": plugin_format, "uri": uri, "status": "load_requested"}
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+def render_serum_audio(
+    variant: Variant, state_id: str | None = None, audition: Audition | None = None,
+    reference_state_id: str | None = None,
+) -> dict[str, Any]:
+    """Render a Serum patch in isolation and return a WAV and measured sound traits.
+
+    Omit state_id to audition Init. Instrument notes specify MIDI pitch, start
+    and length in seconds, optional velocity 0–1 and MIDI channel 0–15. For FX,
+    provide audition.audio_path for a local PCM WAV or omit it for a test signal.
+    Pass a reference_state_id to compare two patches using the same input.
+    """
+    try:
+        return render_audio(variant, state_id, audition or Audition(), reference_state_id)
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def _serum_browser_items(ableton: AbletonConnection, plugin_format: str) -> list[dict[str, str]]:

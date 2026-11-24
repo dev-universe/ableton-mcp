@@ -187,6 +187,8 @@ Parameter assignments belong to each instance. [Ableton Live manual](https://www
 For isolated sound design, see [Serum processor controls](docs/serum-control-reference.md).
 For portable files, embedded audio, and loading onto Live tracks, see
 [Serum preset tools](docs/serum-presets.md).
+To render patches with MIDI or audio input and measure revisions, see
+[Serum auditions](docs/serum-audition.md).
 Use them to inspect settings, choose installed assets, and verify a batch of
 changes before making the next edit.
 

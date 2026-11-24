@@ -120,10 +120,71 @@ public:
 constexpr int blockSize = 256;
 constexpr int sampleRate = 48000;
 constexpr int blocks = 375;
+constexpr int maxFrames = 30 * sampleRate;
 constexpr double twoPi = 6.283185307179586;
 using Frame = std::array<Sample32, blockSize>;
 
-bool render(IComponent *component, bool effect, const char *output) {
+struct ScheduledEvent {
+    int sample;
+    Event event;
+};
+
+struct Audition {
+    int frames = blockSize * blocks;
+    double tempo = 120;
+    bool specified = false;
+    std::vector<ScheduledEvent> notes;
+    std::vector<Sample32> input;
+};
+
+bool readAudition(Audition &audition, const char *path) {
+    std::ifstream file(path);
+    int count = 0;
+    if (!(file >> audition.frames >> audition.tempo >> count)
+        || audition.frames < 1 || audition.frames > maxFrames
+        || !std::isfinite(audition.tempo) || audition.tempo < 20 || audition.tempo > 300
+        || count < 0 || count > 256) return false;
+    audition.specified = true;
+    for (int index = 0; index < count; ++index) {
+        int start, end, pitch, channel;
+        double velocity;
+        if (!(file >> start >> end >> pitch >> velocity >> channel)
+            || start < 0 || end <= start || end >= audition.frames || pitch < 0 || pitch > 127
+            || !std::isfinite(velocity) || velocity <= 0 || velocity > 1 || channel < 0 || channel > 15) return false;
+        Event on{};
+        on.type = Event::kNoteOnEvent;
+        on.noteOn.channel = channel;
+        on.noteOn.pitch = pitch;
+        on.noteOn.velocity = velocity;
+        on.noteOn.noteId = index + 1;
+        Event off{};
+        off.type = Event::kNoteOffEvent;
+        off.noteOff.channel = channel;
+        off.noteOff.pitch = pitch;
+        off.noteOff.noteId = index + 1;
+        audition.notes.push_back({start, on});
+        audition.notes.push_back({end, off});
+    }
+    std::stable_sort(audition.notes.begin(), audition.notes.end(), [](const auto &a, const auto &b) {
+        return a.sample < b.sample || (a.sample == b.sample && a.event.type == Event::kNoteOffEvent
+                                     && b.event.type == Event::kNoteOnEvent);
+    });
+    std::string trailing;
+    return !(file >> trailing);
+}
+
+bool readAudioInput(Audition &audition, const char *path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    const auto size = file.tellg();
+    constexpr int bytesPerFrame = sizeof(Sample32) * 2;
+    if (!file || size <= 0 || size % bytesPerFrame || size > audition.frames * bytesPerFrame) return false;
+    audition.input.resize(size / sizeof(Sample32));
+    file.seekg(0);
+    return file.read(reinterpret_cast<char *>(audition.input.data()), size).good()
+        && std::all_of(audition.input.begin(), audition.input.end(), [](Sample32 x) { return std::isfinite(x); });
+}
+
+bool render(IComponent *component, bool effect, const char *output, const Audition &audition) {
     IAudioProcessor *processor = nullptr;
     if (component->queryInterface(INLINE_UID_OF(IAudioProcessor), reinterpret_cast<void **>(&processor)) != kResultOk)
         return false;
@@ -152,14 +213,13 @@ bool render(IComponent *component, bool effect, const char *output) {
         context.state = ProcessContext::kPlaying | ProcessContext::kTempoValid
             | ProcessContext::kProjectTimeMusicValid | ProcessContext::kTimeSigValid;
         context.sampleRate = sampleRate;
-        context.tempo = 120;
+        context.tempo = audition.tempo;
         context.timeSigNumerator = 4;
         context.timeSigDenominator = 4;
 
         ProcessData frame{};
         frame.processMode = kRealtime;
         frame.symbolicSampleSize = kSample32;
-        frame.numSamples = blockSize;
         frame.numInputs = effect ? 1 : 0;
         frame.numOutputs = 1;
         frame.inputs = effect ? &input : nullptr;
@@ -168,23 +228,42 @@ bool render(IComponent *component, bool effect, const char *output) {
         frame.processContext = &context;
 
         std::vector<Sample32> audio;
-        audio.reserve(blockSize * blocks * 2);
-        for (int block = 0; block < blocks; ++block) {
-            context.projectTimeSamples = block * blockSize;
-            context.projectTimeMusic = context.projectTimeSamples * 2.0 / sampleRate;
+        audio.reserve(audition.frames * 2);
+        std::size_t noteIndex = 0;
+        for (int start = 0; start < audition.frames; start += blockSize) {
+            frame.numSamples = std::min(blockSize, audition.frames - start);
+            context.projectTimeSamples = start;
+            context.projectTimeMusic = start * audition.tempo / (60.0 * sampleRate);
             events.events.clear();
             if (effect) {
-                for (int i = 0; i < blockSize; ++i) {
-                    const double t = (context.projectTimeSamples + i) / double(sampleRate);
-                    const auto signal = t < 0.8 ? std::sin(twoPi * 82 * t) * 0.14
-                        + std::sin(twoPi * 431 * t) * 0.12 + std::sin(twoPi * 2101 * t) * 0.075 : 0.0;
-                    leftIn[i] = signal;
-                    rightIn[i] = signal * 0.85f;
+                input.silenceFlags = 3;
+                for (int i = 0; i < frame.numSamples; ++i) {
+                    const auto index = static_cast<std::size_t>(start + i) * 2;
+                    if (audition.input.empty()) {
+                        const double t = (start + i) / double(sampleRate);
+                        const auto signal = t < 0.8 ? std::sin(twoPi * 82 * t) * 0.14
+                            + std::sin(twoPi * 431 * t) * 0.12 + std::sin(twoPi * 2101 * t) * 0.075 : 0.0;
+                        leftIn[i] = signal;
+                        rightIn[i] = signal * 0.85f;
+                    } else {
+                        leftIn[i] = index < audition.input.size() ? audition.input[index] : 0;
+                        rightIn[i] = index < audition.input.size() ? audition.input[index + 1] : 0;
+                    }
+                    if (leftIn[i] != 0) input.silenceFlags &= ~1ull;
+                    if (rightIn[i] != 0) input.silenceFlags &= ~2ull;
                 }
-                input.silenceFlags = context.projectTimeSamples >= sampleRate * 0.8 ? 3 : 0;
-            } else if (block == 0 || block == 188) {
+            }
+            if (audition.specified) {
+                while (noteIndex < audition.notes.size() && audition.notes[noteIndex].sample < start + frame.numSamples) {
+                    const auto &scheduled = audition.notes[noteIndex++];
+                    auto event = scheduled.event;
+                    event.sampleOffset = scheduled.sample - start;
+                    event.ppqPosition = scheduled.sample * audition.tempo / (60.0 * sampleRate);
+                    events.addEvent(event);
+                }
+            } else if (!effect && (start == 0 || start == 188 * blockSize)) {
                 Event event{};
-                if (block == 0) {
+                if (start == 0) {
                     event.type = Event::kNoteOnEvent;
                     event.noteOn.pitch = 48;
                     event.noteOn.velocity = 0.75;
@@ -201,13 +280,13 @@ bool render(IComponent *component, bool effect, const char *output) {
             outputBus.silenceFlags = 0;
             if (processor->process(frame) != kResultOk)
                 break;
-            for (int i = 0; i < blockSize; ++i) {
+            for (int i = 0; i < frame.numSamples; ++i) {
                 audio.push_back(leftOut[i]);
                 audio.push_back(rightOut[i]);
             }
         }
         processor->setProcessing(false);
-        success = audio.size() == blockSize * blocks * 2
+        success = audio.size() == static_cast<std::size_t>(audition.frames) * 2
             && std::all_of(audio.begin(), audio.end(), [](Sample32 x) { return std::isfinite(x); });
         if (success) {
             std::ofstream file(output, std::ios::binary);
@@ -233,12 +312,26 @@ bool inputState(ProbeStream &stream, const char *path) {
 }
 
 int main(int argc, char **argv) {
-    if ((argc != 6 && argc != 7) || (std::strcmp(argv[2], "instrument") && std::strcmp(argv[2], "fx"))
-        || (argc == 7 && std::strcmp(argv[6], "--wait-for-samples"))) {
-        std::fprintf(stderr, "usage: serum_host PLUGIN_BUNDLE instrument|fx INPUT_STATE|- OUTPUT_STATE OUTPUT_F32LE|- [--wait-for-samples]\n");
+    if (argc < 6 || (std::strcmp(argv[2], "instrument") && std::strcmp(argv[2], "fx"))) {
+        std::fprintf(stderr, "usage: serum_host PLUGIN_BUNDLE instrument|fx INPUT_STATE|- OUTPUT_STATE OUTPUT_F32LE|- "
+            "[--wait-for-samples] [--audition EVENTS] [--audio-input STEREO_F32LE]\n");
         return 1;
     }
     const bool effect = !std::strcmp(argv[2], "fx");
+    const char *eventsPath = nullptr, *audioPath = nullptr;
+    bool waitForSamples = false;
+    for (int index = 6; index < argc; ++index) {
+        if (!std::strcmp(argv[index], "--wait-for-samples") && !waitForSamples) waitForSamples = true;
+        else if (!std::strcmp(argv[index], "--audition") && !eventsPath && index + 1 < argc) eventsPath = argv[++index];
+        else if (!std::strcmp(argv[index], "--audio-input") && !audioPath && index + 1 < argc) audioPath = argv[++index];
+        else { std::fputs("Invalid serum_host option.\n", stderr); return 1; }
+    }
+    Audition audition;
+    if ((eventsPath && !readAudition(audition, eventsPath))
+        || (audioPath && (!effect || !eventsPath || !readAudioInput(audition, audioPath)))) {
+        std::fputs("Invalid Serum audition input.\n", stderr);
+        return 1;
+    }
     auto path = reinterpret_cast<const UInt8 *>(argv[1]);
     auto url = CFURLCreateFromFileSystemRepresentation(nullptr, path, std::strlen(argv[1]), true);
     if (!url) return 2;
@@ -268,10 +361,10 @@ int main(int argc, char **argv) {
         ProbeStream before, after;
         bool loaded = !std::strcmp(argv[3], "-")
             || (inputState(before, argv[3]) && component->setState(&before) == kResultOk);
-        if (loaded && argc == 7)
+        if (loaded && waitForSamples)
             CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.5, false);
         if (loaded && component->getState(&after) == kResultOk && after.size() > 0) {
-            if (!std::strcmp(argv[5], "-") || render(component, effect, argv[5])) {
+            if (!std::strcmp(argv[5], "-") || render(component, effect, argv[5], audition)) {
                 std::ofstream file(argv[4], std::ios::binary);
                 file.write(after.data.data(), after.size());
                 result = file.good() ? 0 : 5;
