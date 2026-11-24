@@ -14,7 +14,7 @@ from typing import Annotated
 import numpy as np
 from pydantic import BaseModel, ConfigDict, Field
 
-from .serum_state import AuditionInput, RENDER_RATE, SerumError, Variant, initial_state, run_host
+from .serum_state import AuditionInput, RENDER_RATE, SerumError, SerumState, Variant, initial_state, run_host
 
 MAX_SECONDS = 30
 SPECTRAL_BANDS = ((20, 120), (120, 500), (500, 2000), (2000, 6000), (6000, 24000))
@@ -173,19 +173,29 @@ def _save_audio(samples: np.ndarray, digest: str) -> Path:
 
 def render_audio(variant: Variant, state_id: str | None, spec: Audition, reference_state_id: str | None = None) -> dict:
     audition, first, last, attack_end = _prepare(variant, spec)
+    state = initial_state(variant, state_id) if state_id is not None else None
+    reference_state = state if reference_state_id == state_id else (
+        initial_state(variant, reference_state_id) if reference_state_id is not None else None
+    )
 
-    def render_one(selected: str | None) -> dict:
-        state = initial_state(variant, selected) if selected is not None else None
-        _, raw = run_host(variant, state, render=True, audition=audition)
+    def render_one(patch: SerumState | None) -> tuple[np.ndarray, dict]:
+        _, raw = run_host(variant, patch, render=True, audition=audition)
         samples = np.frombuffer(raw, dtype="<f4").reshape(-1, 2)
         digest = hashlib.sha256(raw).hexdigest()
-        metrics = measure_audio(samples, first, last, attack_end)
-        return {"state_id": selected, "path": str(_save_audio(samples, digest)), "audio_sha256": digest, "metrics": metrics}
+        return samples, {"audio_sha256": digest, "metrics": measure_audio(samples, first, last, attack_end)}
 
-    result = {"variant": variant, "sample_rate": RENDER_RATE, "frames": audition.frames, **render_one(state_id)}
+    samples, primary = render_one(state)
+    reference_samples, reference = (
+        render_one(reference_state) if reference_state_id is not None and reference_state_id != state_id else (samples, primary)
+    )
+    path = _save_audio(samples, primary["audio_sha256"])
+    result = {"variant": variant, "sample_rate": RENDER_RATE, "frames": audition.frames,
+              "state_id": state_id, "path": str(path), **primary}
     if reference_state_id is not None:
-        reference = result if reference_state_id == state_id else render_one(reference_state_id)
-        result["reference"] = {key: reference[key] for key in ("state_id", "path", "audio_sha256", "metrics")}
+        reference_path = path if reference["audio_sha256"] == primary["audio_sha256"] else _save_audio(
+            reference_samples, reference["audio_sha256"],
+        )
+        result["reference"] = {"state_id": reference_state_id, "path": str(reference_path), **reference}
         metrics = result["metrics"]
         baseline = reference["metrics"]
         result["delta"] = {key: round(value - baseline[key], 6) for key, value in metrics.items()

@@ -3,6 +3,7 @@ import wave
 import numpy as np
 import pytest
 
+from MCP_Server import serum_render
 from MCP_Server.serum_render import Audition, AuditionNote, _prepare, _wav_samples, measure_audio
 from MCP_Server.serum_state import RENDER_RATE, SerumError
 
@@ -40,3 +41,18 @@ def test_audio_analysis_distinguishes_spectral_bands_and_stereo():
     assert wide["band_energy_fraction"]["2000_6000"] > 0.999
     assert mono["spectral_centroid_hz"] == 82 and wide["spectral_centroid_hz"] == 4000
     assert mono["clipped_frames"] == wide["clipped_frames"] == 0
+
+
+def test_failed_reference_does_not_publish_primary(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABLETON_MCP_SERUM_AUDITIONS", str(tmp_path))
+    monkeypatch.setattr(serum_render, "initial_state", lambda variant, state_id: state_id)
+
+    def render(variant, state, *, render, audition):
+        if state == "reference":
+            raise SerumError("Reference could not render")
+        return b"state", bytes(audition.frames * 8)
+
+    monkeypatch.setattr(serum_render, "run_host", render)
+    with pytest.raises(SerumError, match="Reference could not render"):
+        serum_render.render_audio("instrument", "primary", Audition(seconds=0.05), "reference")
+    assert list(tmp_path.iterdir()) == []
