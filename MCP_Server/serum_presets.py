@@ -15,13 +15,24 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from .serum_controls import MISSING, equivalent
 from .serum_state import (
-    PRODUCTS, STATE_LIMIT, STATE_VERSION, SUPPORTED_BUILD, SerumError, SerumState, Variant,
-    decode_state, encode_state, initial_state, read_limited, read_saved_state, run_host, save_state,
+    ASSET_ROOT, PRODUCTS, STATE_LIMIT, STATE_VERSION, SUPPORTED_BUILD, SerumError, SerumState, Variant,
+    decode_state, encode_state, initial_state, preserve_preset_active_clips, preset_active_clips,
+    read_limited, read_saved_state, run_host, save_state,
 )
 
 EXTENSION = ".SerumPreset"
 FILE_ONLY = {"fileType", "presetName", "presetAuthor", "presetComment", "presetDescription", "tags"}
 PROCESSOR_ONLY = {"component", "modMatrixLocked", "scalarCurvesLocked"}
+LEGACY_FACTORY_SCHEMAS: dict[Variant, dict[str, tuple[int, ...]]] = {
+    "instrument": {
+        "2.0.11": (3, 4),
+        "2.0.12": (4, 5),
+        "2.0.13": (5, 6),
+        "2.0.14": (6,),
+        "2.0.15": (6,),
+    },
+    "fx": {"2.0.13": (5,)},
+}
 VST3_CLASS_IDS = {"instrument": b"56534558667350736572756D20320000", "fx": b"56534558667351736572756D20322066"}
 LIVE_PRESET_FOLDER = "Serum MCP Presets"
 LIVE_PRESET_BROWSER = f"user_library/{LIVE_PRESET_FOLDER}"
@@ -158,6 +169,7 @@ def _au_preset(variant: Variant, state: SerumState, name: str) -> bytes:
         if result.returncode:
             raise SerumError(f"Serum Audio Units export failed. {result.stderr.strip()[-300:]}")
         preset = _read_au_preset(destination, variant)
+    preset["Processor State"] = preserve_preset_active_clips(preset["Processor State"], state)
     readback = decode_state(preset["Processor State"])
     readback.require_processor(variant)
     expected = state.data
@@ -202,26 +214,78 @@ def check_live_preset(variant: Variant, name: str, plugin_format: LiveFormat) ->
     return filename
 
 
+def _read_native_preset(path: Path, variant: Variant | None) -> tuple[SerumState, Variant, bool]:
+    preset = decode_state(read_limited(path))
+    header = preset.metadata
+    product_variant = next((kind for kind, product in PRODUCTS.items() if header.get("product") == product), None)
+    if (product_variant is None or (variant is not None and product_variant != variant)
+            or header.get("fileType") != "SerumPreset" or "component" in header):
+        expected = PRODUCTS[variant] if variant is not None else "Serum 2"
+        raise SerumError(f"Expected a native {expected} preset.")
+    build, schema = header.get("productVersion"), header.get("version")
+    legacy = (build, schema) != (SUPPORTED_BUILD, STATE_VERSION)
+    if legacy and (not isinstance(build, str) or schema not in LEGACY_FACTORY_SCHEMAS[product_variant].get(build, ())):
+        raise SerumError(
+            f"Unsupported Serum preset version. Open and resave it in Serum {SUPPORTED_BUILD} "
+            f"to migrate it to schema {STATE_VERSION}."
+        )
+    for key in ("fileType", "product", "productVersion", "version"):
+        if (legacy or key in preset.data) and preset.data.get(key) != header[key]:
+            raise SerumError(f"Serum preset header and body disagree on {key}.")
+    return preset, product_variant, legacy
+
+
+def list_factory_presets(variant: Variant | None, search: str, offset: int, limit: int) -> dict:
+    folder = (ASSET_ROOT / "Presets" / "Factory").resolve()
+    if not folder.is_dir():
+        raise SerumError("Serum Factory preset directory was not found.")
+    query = search.strip().casefold()
+    presets = []
+    for path in sorted(folder.rglob("*"), key=lambda candidate: candidate.relative_to(folder).as_posix().casefold()):
+        if path.suffix.casefold() != EXTENSION.casefold() or not path.is_file():
+            continue
+        try:
+            resolved = path.resolve()
+            if not resolved.is_relative_to(folder):
+                continue
+            preset, kind, _ = _read_native_preset(resolved, variant)
+        except (SerumError, OSError):
+            continue
+        relative_path = path.relative_to(folder).as_posix()
+        name = preset.metadata.get("presetName")
+        if not isinstance(name, str) or not name:
+            name = path.stem
+        if query in relative_path.casefold() or query in name.casefold():
+            presets.append({
+                "variant": kind, "name": name, "path": str(resolved), "relative_path": relative_path,
+                "source_product_version": preset.metadata["productVersion"], "source_schema_version": preset.metadata["version"],
+            })
+    return {"variant": variant, "total": len(presets), "presets": presets[offset : offset + limit]}
+
+
 def import_preset(variant: Variant, source: str) -> dict:
     path = Path(source).expanduser()
     if not path.is_absolute() or path.suffix.casefold() != EXTENSION.casefold() or not path.is_file():
         raise SerumError("Pass the absolute path of an existing .SerumPreset file.")
-    preset = decode_state(read_limited(path))
+    preset, _, migrated = _read_native_preset(path, variant)
     header = preset.metadata
-    if header.get("fileType") != "SerumPreset" or header.get("product") != PRODUCTS[variant] or "component" in header:
-        raise SerumError(f"Expected a native {PRODUCTS[variant]} preset.")
-    if header.get("version") != STATE_VERSION or header.get("productVersion") != SUPPORTED_BUILD:
-        raise SerumError(f"Open and resave the preset in Serum {SUPPORTED_BUILD} to migrate it to schema {STATE_VERSION}.")
+    active_clips = preset_active_clips(preset)
     base = initial_state(variant)
     content = {key: value for key, value in preset.data.items() if key not in FILE_ONLY | PROCESSOR_ONLY}
+    # The native processor uses the body version to migrate legacy parameters.
     requested = SerumState(base.metadata, base.data | content)
     raw, _ = run_host(variant, requested)
     normalized = decode_state(raw).data
     normalized_sections = sorted(
         key for key, value in content.items() if not equivalent(normalized.get(key, MISSING), value)
     )
-    return {
-        "variant": variant, "state_id": save_state(raw), "path": str(path.resolve()),
+    receipt = {
+        "variant": variant, "state_id": save_state(preserve_preset_active_clips(raw, preset)), "path": str(path.resolve()),
         "details": {key: header[key] for key in sorted(FILE_ONLY - {"fileType"}) if key in header},
         "normalized_sections": normalized_sections,
+        "source_product_version": header["productVersion"], "source_schema_version": header["version"],
+        "migrated": migrated,
     }
+    if active_clips:
+        receipt["preserved_preset_clips"] = active_clips
+    return receipt

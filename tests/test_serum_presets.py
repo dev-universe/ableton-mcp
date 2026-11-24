@@ -32,6 +32,7 @@ def test_native_export_import_preserves_state_and_refuses_overwrite(tmp_path, mo
     imported = serum_presets.import_preset("instrument", receipt["path"])
     assert imported["details"]["presetAuthor"] == "Author"
     assert imported["normalized_sections"] == []
+    assert not imported["migrated"]
     imported_state = serum_state.read_saved_state(imported["state_id"], "instrument")
     assert imported_state.data == {key: value for key, value in data.items() if key != "modMatrixLocked"}
 
@@ -40,6 +41,86 @@ def test_native_export_import_preserves_state_and_refuses_overwrite(tmp_path, mo
     assert destination.read_bytes() == exported
     with pytest.raises(SerumError, match="native Serum2FX"):
         serum_presets.import_preset("fx", receipt["path"])
+
+
+def _write_factory_preset(path, *, product="Serum2", build="2.0.11", version=4, body_overrides=None):
+    metadata = {"fileType": "SerumPreset", "product": product,
+                "productVersion": build, "version": version, "presetName": path.stem}
+    body = {**metadata, "Oscillator0": {"plainParams": {"kParamVolume": 0.37}}, **(body_overrides or {})}
+    raw = serum_state.encode_state(SerumState(metadata, body))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(raw)
+    return raw
+
+
+def test_factory_import_preserves_legacy_body_version_for_native_migration(tmp_path, monkeypatch):
+    source = tmp_path / "Factory Pad.SerumPreset"
+    original = _write_factory_preset(source, body_overrides={"ClipPlayer0": {"activeClips": [1, 0]}})
+    monkeypatch.setenv("ABLETON_MCP_SERUM_STATES", str(tmp_path / "states"))
+    metadata = {"component": "processor", "product": "Serum2", "productVersion": "2.1.5", "version": 11}
+    monkeypatch.setattr(serum_presets, "initial_state", lambda variant: SerumState(metadata, metadata))
+
+    def run_host(variant, requested):
+        requested.require_processor(variant)
+        assert requested.data["version"] == 4
+        assert requested.data["productVersion"] == "2.0.11"
+        assert requested.data["component"] == "processor"
+        assert "fileType" not in requested.data
+        assert "presetName" not in requested.data
+        assert requested.data["ClipPlayer0"]["activeClips"] == [1, 0]
+        canonical = requested.data | metadata | {"ClipPlayer0": {"nativeField": 3}}
+        return serum_state.encode_state(SerumState(metadata, canonical)), None
+
+    monkeypatch.setattr(serum_presets, "run_host", run_host)
+    receipt = serum_presets.import_preset("instrument", str(source))
+
+    assert receipt["migrated"]
+    assert receipt["source_product_version"] == "2.0.11"
+    assert receipt["source_schema_version"] == 4
+    assert receipt["details"]["presetName"] == "Factory Pad"
+    assert receipt["preserved_preset_clips"] == [1, 0]
+    assert "ClipPlayer0" in receipt["normalized_sections"]
+    restored = serum_state.read_saved_state(receipt["state_id"], "instrument")
+    assert restored.data["version"] == 11
+    assert restored.data["Oscillator0"]["plainParams"]["kParamVolume"] == 0.37
+    assert restored.data["ClipPlayer0"] == {"nativeField": 3, "activeClips": [1, 0]}
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize(("options", "message"), [
+    ({"version": 12}, "Unsupported Serum preset version"),
+    ({"build": "2.0.12", "version": 3}, "Unsupported Serum preset version"),
+    ({"body_overrides": {"version": 11}}, "header and body disagree on version"),
+    ({"body_overrides": {"product": "Serum2FX"}}, "header and body disagree on product"),
+    ({"body_overrides": {"ClipPlayer0": {"activeClips": [True]}}}, "active clip selection"),
+])
+def test_factory_import_rejects_unverified_source_before_running_native_host(tmp_path, monkeypatch, options, message):
+    source = tmp_path / "Invalid.SerumPreset"
+    _write_factory_preset(source, **options)
+    monkeypatch.setattr(serum_presets, "initial_state", lambda variant: pytest.fail("Native host must not run"))
+
+    with pytest.raises(SerumError, match=message):
+        serum_presets.import_preset("instrument", str(source))
+
+
+def test_factory_search_filters_product_and_confines_results_to_the_library(tmp_path, monkeypatch):
+    monkeypatch.setattr(serum_presets, "ASSET_ROOT", tmp_path)
+    factory = tmp_path / "Presets" / "Factory"
+    instrument = factory / "Pad" / "A.SerumPreset"
+    effect = factory / "Pad" / "B.SerumPreset"
+    _write_factory_preset(instrument)
+    _write_factory_preset(effect, product="Serum2FX", build="2.0.13", version=5)
+    (factory / "Pad" / "Broken.SerumPreset").write_bytes(b"invalid")
+    external = tmp_path / "External.SerumPreset"
+    _write_factory_preset(external)
+    (factory / "Pad" / "Escaped.SerumPreset").symlink_to(external)
+
+    page = serum_presets.list_factory_presets(None, "pAD", 1, 1)
+    assert page["total"] == 2
+    assert [preset["variant"] for preset in page["presets"]] == ["fx"]
+    assert page["presets"][0]["path"] == str(effect.resolve())
+    instruments = serum_presets.list_factory_presets("instrument", "pad", 0, 50)
+    assert [preset["relative_path"] for preset in instruments["presets"]] == ["Pad/A.SerumPreset"]
 
 
 @pytest.mark.parametrize("name", ["../escape", "wrong.SerumPreset", "/absolute", "a:b", "a\nb"])
