@@ -18,6 +18,10 @@ from .telemetry import record_startup
 from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
 from .dataset import dataset_enabled, get_recorder
 from .dataset.trajectory_decorator import trajectory_tool
+from .serum_controls import (
+    FX_MODULES, MISSING, RACKS, Mode, SerumEdits, StatePath, describe, edit_state, list_assets, value_at,
+)
+from .serum_state import SUPPORTED_BUILD, SerumError, Variant, initial_state
 
 ABLETON_HOST = os.environ.get("ABLETON_HOST", "localhost")
 ABLETON_PORT = int(os.environ.get("ABLETON_PORT", "9877"))
@@ -1027,6 +1031,62 @@ SERUM_BROWSER_PATHS = {
     "vst3": "plugins/VST3/Xfer Records",
     "au": "plugins/AUv2/Xfer Records",
 }
+
+
+@mcp.tool(annotations=READ_ONLY)
+def list_serum_assets(
+    mode: Mode,
+    search: str = "",
+    offset: Annotated[int, Field(ge=0, strict=True)] = 0,
+    limit: Annotated[int, Field(ge=1, le=200, strict=True)] = 50,
+) -> dict[str, Any]:
+    """Find installed Serum assets by oscillator mode. Use a returned relative path in edit_serum_state."""
+    try:
+        return list_assets(mode, search, offset, limit)
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_serum_control_state(
+    variant: Variant,
+    state_id: str | None = None,
+    path: StatePath | None = None,
+) -> dict[str, Any]:
+    """Inspect Serum 2.1.5 control sections in an isolated processor.
+
+    Omit state_id for a fresh instance. Omit path for section names and FX choices.
+    Use a path such as ["Oscillator0", "plainParams"] to read an individual section.
+    """
+    try:
+        state = initial_state(variant, state_id)
+        if path is None:
+            return {
+                "variant": variant, "build": SUPPORTED_BUILD, "sections": sorted(state.data),
+                "effect_modules": list(FX_MODULES), "effect_buses": list(RACKS),
+            }
+        value = value_at(state.data, path)
+        if value is MISSING:
+            raise SerumError(f"Serum state path is absent: {path}")
+        return {"variant": variant, "state_id": state_id, "path": path, "value": describe(value)}
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+def edit_serum_state(variant: Variant, edits: SerumEdits, base_state_id: str | None = None) -> dict[str, Any]:
+    """Change Serum 2.1.5 settings in an isolated VST3 instance and verify processor readback.
+
+    Start from Init or pass the state_id from a previous edit. Values take a path
+    and native value. For example ["Env0","plainParams","kParamAttack"] takes
+    an envelope attack value. Oscillator assets select an installed wavetable or
+    sample by category-relative path. Effect chains replace one bus in the given
+    order. Inspect with get_serum_control_state before issuing unfamiliar edits.
+    """
+    try:
+        return edit_state(variant, edits, base_state_id)
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
 
 
 def _serum_browser_items(ableton: AbletonConnection, plugin_format: str) -> list[dict[str, str]]:

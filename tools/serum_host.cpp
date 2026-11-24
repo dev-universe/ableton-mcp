@@ -233,8 +233,9 @@ bool inputState(ProbeStream &stream, const char *path) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 6 || (std::strcmp(argv[2], "instrument") && std::strcmp(argv[2], "fx"))) {
-        std::fprintf(stderr, "usage: serum_host PLUGIN_BUNDLE instrument|fx INPUT_STATE|- OUTPUT_STATE OUTPUT_F32LE|-\n");
+    if ((argc != 6 && argc != 7) || (std::strcmp(argv[2], "instrument") && std::strcmp(argv[2], "fx"))
+        || (argc == 7 && std::strcmp(argv[6], "--wait-for-samples"))) {
+        std::fprintf(stderr, "usage: serum_host PLUGIN_BUNDLE instrument|fx INPUT_STATE|- OUTPUT_STATE OUTPUT_F32LE|- [--wait-for-samples]\n");
         return 1;
     }
     const bool effect = !std::strcmp(argv[2], "fx");
@@ -267,6 +268,8 @@ int main(int argc, char **argv) {
         ProbeStream before, after;
         bool loaded = !std::strcmp(argv[3], "-")
             || (inputState(before, argv[3]) && component->setState(&before) == kResultOk);
+        if (loaded && argc == 7)
+            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.5, false);
         if (loaded && component->getState(&after) == kResultOk && after.size() > 0) {
             if (!std::strcmp(argv[5], "-") || render(component, effect, argv[5])) {
                 std::ofstream file(argv[4], std::ios::binary);
