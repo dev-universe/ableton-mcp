@@ -160,7 +160,13 @@ def _au_preset(variant: Variant, state: SerumState, name: str) -> bytes:
         preset = _read_au_preset(destination, variant)
     readback = decode_state(preset["Processor State"])
     readback.require_processor(variant)
-    if not equivalent(readback.data, state.data):
+    expected = state.data
+    quantizer = "PitchQuantizer0"
+    if expected.get(quantizer) == {"plainParams": {}, "scale": [0] * 12, "scaleName": ""} and readback.data.get(quantizer) == {
+        "plainParams": {}, "scale": [0, 2, 0, 2, 0, 0, 2, 0, 2, 0, 2, 0], "scaleName": "Major",
+    }:
+        expected = {**expected, quantizer: readback.data[quantizer]}
+    if not equivalent(readback.data, expected):
         raise SerumError("Serum Audio Units did not retain the requested processor state.")
     controller_raw = preset.get("Controller State")
     if not isinstance(controller_raw, bytes):

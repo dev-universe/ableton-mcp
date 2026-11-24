@@ -40,7 +40,9 @@ library references.
 
 The default Live User Library is `~/Music/Ableton/User Library`. Set
 `ABLETON_MCP_LIVE_USER_LIBRARY` to the path shown in Live's Library Settings if
-it has been moved. Exporting to the User Library does not edit the active set.
+it has been moved. Exporting to the User Library does not edit the active set. When AU restores
+its inactive, unnamed default pitch quantizer, it serializes the default
+scale as Major with the quantizer still inactive.
 
 Build the optional AU export helper on macOS and set `ABLETON_MCP_SERUM_AU_HOST`
 to the executable's absolute path, or put it in `~/.cache/ableton-mcp`.
