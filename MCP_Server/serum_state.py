@@ -29,6 +29,8 @@ MAGIC = b"XferJson\0"
 BUNDLE = Path("/Library/Audio/Plug-Ins/VST3/Serum2.vst3")
 ASSET_ROOT = Path("/Library/Audio/Presets/Xfer Records/Serum 2 Presets")
 STATE_ID = re.compile(r"[0-9a-f]{64}\Z")
+RENDER_RATE = 48000
+DEFAULT_RENDER_FRAMES = RENDER_RATE * 2
 
 
 class SerumError(ValueError):
@@ -49,6 +51,13 @@ class SerumState:
         }
         if any(self.metadata.get(key) != value for key, value in expected.items()):
             raise SerumError(f"Expected {PRODUCTS[variant]} {SUPPORTED_BUILD} processor state (schema {STATE_VERSION}).")
+
+
+@dataclass(frozen=True)
+class AuditionInput:
+    frames: int
+    events: str
+    audio: bytes | None = None
 
 
 def read_limited(path: Path, limit: int = STATE_LIMIT) -> bytes:
@@ -136,7 +145,8 @@ def save_state(raw: bytes) -> str:
 
 
 def run_host(
-    variant: Variant, state: SerumState | None = None, render: bool = False
+    variant: Variant, state: SerumState | None = None, render: bool = False,
+    audition: AuditionInput | None = None,
 ) -> tuple[bytes, bytes | None]:
     if platform.system() != "Darwin":
         raise SerumError("The Serum processor host requires macOS.")
@@ -169,6 +179,16 @@ def run_host(
             for index in range(3)
         ):
             args.append("--wait-for-samples")
+        frames = DEFAULT_RENDER_FRAMES
+        if audition is not None:
+            frames = audition.frames
+            events_path = folder / "events.txt"
+            events_path.write_text(audition.events, encoding="ascii")
+            args.extend(("--audition", str(events_path)))
+            if audition.audio is not None:
+                stimulus = folder / "stimulus.f32"
+                stimulus.write_bytes(audition.audio)
+                args.extend(("--audio-input", str(stimulus)))
         try:
             result = subprocess.run(
                 args,
@@ -183,11 +203,11 @@ def run_host(
             raise SerumError(f"Serum processor host exited with {result.returncode}. {reason}".rstrip())
         try:
             raw = read_limited(output_path)
-            audio = read_limited(audio_path, 768000) if render else None
+            audio = read_limited(audio_path, frames * 8) if render else None
         except FileNotFoundError as exc:
             raise SerumError("Serum processor host did not write its result.") from exc
     decode_state(raw).require_processor(variant)
-    if render and len(audio) != 768000:
+    if render and (audio is None or len(audio) != frames * 8):
         raise SerumError("Incomplete Serum probe render.")
     return raw, audio
 
