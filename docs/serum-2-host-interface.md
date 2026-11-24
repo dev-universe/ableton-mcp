@@ -122,8 +122,8 @@ runs for each slice. Mach-O starts are a separate count from the binary's
 
 Craft Anything reported 27,974 arm64 and 30,498 x86_64 VST3 function
 candidates. Its lists include every Mach-O function start in both VST3
-slices. It produced pseudocode for the 41 VST3 entries in the Ghidra unavailable
-column. Ghidra and Craft Anything use different discovery and
+slices. It produced pseudocode for all 43 entries in the Ghidra unavailable column.
+Ghidra and Craft Anything use different discovery and
 decompilation rules, including inferred function boundaries.
 
 The pseudocode and disassembly provide static evidence about the analyzed
