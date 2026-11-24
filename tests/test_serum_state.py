@@ -104,3 +104,28 @@ def test_fx_replacement_keeps_requested_order(tmp_path, monkeypatch):
     assert [entry["type"] for entry in value] == [7, 0]
     assert "FXEQ" in value[0]
     assert "FXDistortion" in value[1]
+
+
+def test_verified_native_defaults_allow_center_and_eq_shelf_reset(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABLETON_MCP_SERUM_STATES", str(tmp_path))
+    base = processor()
+    base.data["Oscillator1"] = {"plainParams": {"kParamPan": -10}}
+    readback = processor()
+    readback.data["Oscillator1"] = {"plainParams": {}}
+    readback.data["FXRack0"]["FX"] = [{"type": 7, "FXEQ": {"plainParams": {}}}]
+    monkeypatch.setattr(serum_controls, "initial_state", lambda *args: base)
+    monkeypatch.setattr(serum_controls, "run_host", lambda *args: (encode_state(readback), None))
+    pan = ["Oscillator1", "plainParams", "kParamPan"]
+    edits = SerumEdits.model_validate({
+        "values": [{"path": pan, "value": 0}],
+        "effect_chains": [{"modules": [{"module": "equalizer", "parameters": {"kParamType2": 0}}]}],
+    })
+    checked = serum_controls.edit_state("instrument", edits)["changes"]
+    assert checked[0] == {"path": pan, "value": 0, "native_defaults": [pan]}
+    assert checked[1]["native_defaults"] == [["FXRack0", "FX", 0, "FXEQ", "plainParams", "kParamType2"]]
+    assert len(list(tmp_path.iterdir())) == 1
+
+    edits.values[0].value = 10
+    with pytest.raises(SerumError, match="did not retain"):
+        serum_controls.edit_state("instrument", edits)
+    assert len(list(tmp_path.iterdir())) == 1

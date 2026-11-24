@@ -16,7 +16,11 @@ Put the probe at `~/.cache/ableton-mcp/serum-host` or set
 3. Call `edit_serum_state` with the same variant and paths in `edits.values`.
    Each entry has a `path` array and a `value`. The tool returns an error
    when the processor omits or changes a requested value. Readback tolerates
-   small floating-point differences. Omitting `base_state_id` starts at Init.
+   small floating-point differences. Some schema-11 defaults disappear from
+   the readback, including centered oscillator pan, B/C switched off, zero
+   macros and mod wheel, and the two default EQ shelves. Verified omissions
+   appear under `native_defaults` on edits and as `source="native_default"`
+   on individual reads. Omitting `base_state_id` starts at Init.
 
 These controls were exercised against the installed processor. Values in
 `plainParams` use Serum's state units. The units vary by control.
@@ -34,8 +38,8 @@ These controls were exercised against the installed processor. Values in
 | MIDI clip notes | `MidiClip0.clip.notes` and `MidiClip0.clip.regionEndBeats` |
 
 Processor serialization omits macro names, clip names, and standalone clip
-activation in the tested cases. The tool reports an omitted requested field
-as an error. MIDI clip note records use `noteNum`, `timeStamp`, and
+activation in the tested cases. The tool reports those requested fields as
+errors. MIDI clip note records use `noteNum`, `timeStamp`, and
 `length` with times in beats, plus `attributes`, `channel`, and
 `expressionEvents`. Inspect the state before editing a clip.
 
