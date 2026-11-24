@@ -5,8 +5,11 @@ from __future__ import annotations
 import math
 import re
 import subprocess
+import wave
+from array import array
 from copy import deepcopy
 from pathlib import Path
+from sys import byteorder
 from typing import Annotated, Literal
 from xml.etree import ElementTree
 
@@ -18,6 +21,7 @@ from .serum_state import (
 )
 
 Mode = Literal["wavetable", "sample", "granular", "spectral", "multisample"]
+EmbeddedMode = Literal["wavetable", "sample", "granular", "spectral"]
 PathPart = StrictStr | StrictInt
 StatePath = Annotated[list[PathPart], Field(min_length=1, max_length=12)]
 ASSET_MODES: dict[Mode, tuple[str, str, str, str]] = {
@@ -53,6 +57,8 @@ ASSET_PATH_KEYS = {
     "relativePathToIR": "Impulses",
     "relativePathToNoiseSample": "Samples/Factory Non-Tonal/Noises",
 }
+MEDIA_KEYS = {"embeddedWTData", "embedded_audio", "relativePathToWT", "pathToWT", "samplePathRelative", "samplePath"}
+MAX_EMBEDDED_SAMPLES = 512 * 1024
 MOD_SLOT = re.compile(r"ModSlot(?:[0-9]|[1-5][0-9]|6[0-3])\Z")
 PARAM_NAME = re.compile(r"kParam[A-Za-z0-9_]{1,64}\Z")
 MISSING = object()
@@ -74,6 +80,15 @@ class OscillatorAsset(BaseModel):
     base_note: Annotated[int, Field(strict=True, ge=0, le=127)] | None = None
 
 
+class EmbeddedOscillatorAsset(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    oscillator: Annotated[int, Field(strict=True, ge=1, le=3)]
+    mode: EmbeddedMode
+    wav_path: Annotated[str, Field(min_length=1, max_length=4096)]
+    base_note: Annotated[int, Field(strict=True, ge=0, le=127)] = 60
+
+
 class EffectModule(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -93,6 +108,7 @@ class SerumEdits(BaseModel):
 
     values: list[StateEdit] = Field(default_factory=list, max_length=96)
     oscillator_assets: list[OscillatorAsset] = Field(default_factory=list, max_length=3)
+    embedded_assets: list[EmbeddedOscillatorAsset] = Field(default_factory=list, max_length=3)
     effect_chains: list[EffectChain] = Field(default_factory=list, max_length=3)
 
 
@@ -122,13 +138,22 @@ def equivalent(actual, expected) -> bool:
     return actual == expected
 
 
-def describe(value):
+def describe(value, field=None):
     if value is MISSING:
         return "<omitted>"
     if isinstance(value, bytes):
         return {"embedded_bytes": len(value)}
+    if field == "embeddedWTData" and isinstance(value, list):
+        return {"embedded_frames": len(value)}
+    if field == "embedded_audio" and isinstance(value, dict):
+        channels = value.get("data", [])
+        if not isinstance(channels, list):
+            return {"embedded_audio": "unrecognized channel data"}
+        frames = len(channels[0]) if channels and isinstance(channels[0], list) else 0
+        return {"embedded_frames": frames, "channels": len(channels),
+                "sample_rate": value.get("sampleRate"), "name": value.get("table_name")}
     if isinstance(value, dict):
-        return {str(key): describe(item) for key, item in value.items()}
+        return {str(key): describe(item, key) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [describe(item) for item in value]
     if isinstance(value, float) and not math.isfinite(value):
@@ -200,8 +225,8 @@ def _validate_value(value, field: str | None = None, depth: int = 0) -> None:
             _validate_value(item, depth=depth + 1)
     elif type(value) is float and not math.isfinite(value):
         raise SerumError("Serum edits require finite numbers.")
-    elif field == "samplePath" and value:
-        raise SerumError("Use an installed asset via the oscillator asset selector.")
+    elif field in {"samplePath", "pathToWT"} and value:
+        raise SerumError("Use the installed or embedded oscillator asset selector.")
     elif field in ASSET_PATH_KEYS and isinstance(value, str) and value:
         _asset_path(ASSET_PATH_KEYS[field], value)
 
@@ -241,6 +266,43 @@ def _asset_edits(asset: OscillatorAsset) -> list[tuple[list[PathPart], JsonValue
     return edits
 
 
+def _embedded_asset_edits(asset: EmbeddedOscillatorAsset) -> list[tuple[list[PathPart], JsonValue]]:
+    source = Path(asset.wav_path).expanduser()
+    if not source.is_absolute() or source.suffix.casefold() != ".wav" or not source.is_file():
+        raise SerumError("Use the absolute path of a local PCM16 WAV file to embed.")
+    try:
+        with wave.open(str(source), "rb") as file:
+            frames, channels, rate = file.getnframes(), file.getnchannels(), file.getframerate()
+            if channels not in (1, 2) or file.getsampwidth() != 2 or not 8000 <= rate <= 192000:
+                raise SerumError("Embedded assets require mono or stereo PCM16 WAV at 8–192 kHz.")
+            if frames < 1 or frames * channels > MAX_EMBEDDED_SAMPLES:
+                raise SerumError(f"Embedded assets are limited to {MAX_EMBEDDED_SAMPLES} PCM samples.")
+            if asset.mode == "wavetable" and (channels != 1 or frames % 2048):
+                raise SerumError("An embedded wavetable needs mono WAV data in 2048-sample cycles.")
+            raw = file.readframes(frames)
+    except (wave.Error, EOFError) as exc:
+        raise SerumError("Cannot read the embedded WAV file.") from exc
+    if len(raw) != frames * channels * 2:
+        raise SerumError("Embedded WAV data is incomplete.")
+    samples = array("h", raw)
+    if byteorder == "big":
+        samples.byteswap()
+    audio = [[sample / 32768.0 for sample in samples[index::channels]] for index in range(channels)]
+    _, prefix, _, engine = ASSET_MODES[asset.mode]
+    index = asset.oscillator - 1
+    section = f"Oscillator{index}"
+    target = [section, f"{prefix}{index}"]
+    media = {"numFrames": frames, "numChannels": channels, "sampleRate": rate}
+    if asset.mode == "wavetable":
+        media.update(embeddedWTData=audio[0], tableDisplayName=source.stem, interpolateAfterLoad=0)
+    else:
+        media.update(embedded_audio={"data": audio, "sampleRate": rate, "table_name": source.stem},
+                     baseNote=asset.base_note)
+    return [([section, "plainParams", "kParamType"], engine)] + [
+        ([*target, key], value) for key, value in media.items()
+    ]
+
+
 def _effect_edits(chain: EffectChain) -> tuple[list[PathPart], JsonValue]:
     modules = []
     for item in chain.modules:
@@ -257,6 +319,8 @@ def edit_state(variant: Variant, edits: SerumEdits, base_state_id: str | None = 
     changes = [(item.path, item.value) for item in edits.values]
     for asset in edits.oscillator_assets:
         changes.extend(_asset_edits(asset))
+    for asset in edits.embedded_assets:
+        changes.extend(_embedded_asset_edits(asset))
     changes.extend(_effect_edits(chain) for chain in edits.effect_chains)
     if not changes:
         raise SerumError("At least one Serum edit is required.")
@@ -265,6 +329,13 @@ def edit_state(variant: Variant, edits: SerumEdits, base_state_id: str | None = 
             raise SerumError(f"Overlapping Serum edits are ambiguous: {path}")
     base = initial_state(variant, base_state_id)
     edited = deepcopy(base.data)
+    for asset in [*edits.oscillator_assets, *edits.embedded_assets]:
+        index = asset.oscillator - 1
+        prefix = ASSET_MODES[asset.mode][1]
+        target = value_at(edited, [f"Oscillator{index}", f"{prefix}{index}"])
+        if isinstance(target, dict):
+            for key in MEDIA_KEYS:
+                target.pop(key, None)
     reserved = set(base.metadata) | {"component", "fileType", "hash", "product", "productVersion", "version"}
     for path, value in changes:
         _set_value(edited, path, value, reserved)
@@ -276,6 +347,6 @@ def edit_state(variant: Variant, edits: SerumEdits, base_state_id: str | None = 
         if readback is MISSING and expected == "kOsc_WT" and path[-1] == "kParamType":
             readback = "kOsc_WT"
         if not equivalent(readback, expected):
-            raise SerumError(f"Serum did not retain {path}. Readback was {describe(readback)!r}.")
-        checked.append({"path": path, "value": describe(readback)})
+            raise SerumError(f"Serum did not retain {path}. Readback was {describe(readback, path[-1])!r}.")
+        checked.append({"path": path, "value": describe(readback, path[-1])})
     return {"state_id": save_state(result), "variant": variant, "build": SUPPORTED_BUILD, "changes": checked}

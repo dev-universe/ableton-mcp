@@ -185,6 +185,8 @@ value, and range, then pass that index and a value to `set_device_parameter`.
 Parameter assignments belong to each instance. [Ableton Live manual](https://www.ableton.com/en/live-manual/12/using-plug-ins/).
 
 For isolated sound design, see [Serum processor controls](docs/serum-control-reference.md).
+For portable files, embedded audio, and loading onto Live tracks, see
+[Serum preset tools](docs/serum-presets.md).
 Use them to inspect settings, choose installed assets, and verify a batch of
 changes before making the next edit.
 

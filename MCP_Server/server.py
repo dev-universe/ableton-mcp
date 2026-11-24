@@ -21,6 +21,10 @@ from .dataset.trajectory_decorator import trajectory_tool
 from .serum_controls import (
     FX_MODULES, MISSING, RACKS, Mode, SerumEdits, StatePath, describe, edit_state, list_assets, value_at,
 )
+from .serum_presets import (
+    LIVE_PRESET_BROWSER, LIVE_PRESET_FOLDER, LiveFormat, PresetDetails, check_live_preset,
+    export_live_preset, export_preset, import_preset,
+)
 from .serum_state import SUPPORTED_BUILD, SerumError, Variant, initial_state
 
 ABLETON_HOST = os.environ.get("ABLETON_HOST", "localhost")
@@ -1068,7 +1072,7 @@ def get_serum_control_state(
         value = value_at(state.data, path)
         if value is MISSING:
             raise SerumError(f"Serum state path is absent: {path}")
-        return {"variant": variant, "state_id": state_id, "path": path, "value": describe(value)}
+        return {"variant": variant, "state_id": state_id, "path": path, "value": describe(value, path[-1])}
     except (SerumError, OSError) as exc:
         raise ToolError(str(exc)) from exc
 
@@ -1080,13 +1084,86 @@ def edit_serum_state(variant: Variant, edits: SerumEdits, base_state_id: str | N
     Start from Init or pass the state_id from a previous edit. Values take a path
     and native value. For example ["Env0","plainParams","kParamAttack"] takes
     an envelope attack value. Oscillator assets select an installed wavetable or
-    sample by category-relative path. Effect chains replace one bus in the given
-    order. Inspect with get_serum_control_state before issuing unfamiliar edits.
+    sample by category-relative path. Embedded assets store a local PCM16 WAV
+    inside the patch. Effect chains replace one bus in the given order.
+    Inspect with get_serum_control_state before issuing unfamiliar edits.
     """
     try:
         return edit_state(variant, edits, base_state_id)
     except (SerumError, OSError) as exc:
         raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+def save_serum_preset(variant: Variant, state_id: str, details: PresetDetails) -> dict[str, Any]:
+    """Save a verified state as a new native .SerumPreset. Returns its absolute path.
+
+    Load the file in the matching Serum editor in your DAW. A name conflict
+    leaves the existing file intact. Use a different name for a revision.
+    """
+    try:
+        return export_preset(variant, state_id, details)
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+def import_serum_preset(variant: Variant, path: str) -> dict[str, Any]:
+    """Open a local Serum 2.1.5 native preset as an editable processor state.
+
+    Pass the absolute .SerumPreset path. Use the returned state_id in edit_serum_state.
+    normalized_sections lists where the processor changed or omitted native file data.
+    """
+    try:
+        return import_preset(variant, path)
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
+def export_serum_live_preset(
+    variant: Variant, state_id: str, name: Annotated[str, Field(min_length=1, max_length=96)],
+    plugin_format: LiveFormat = "vst3",
+) -> dict[str, Any]:
+    """Write a new Serum VST3 or Audio Units preset to Live's User Library.
+
+    Let Live index the file, then use load_serum_live_preset with the same name.
+    Use save_serum_preset to create the cross-host native .SerumPreset file.
+    """
+    try:
+        return export_live_preset(variant, state_id, name, plugin_format)
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False))
+def load_serum_live_preset(
+    variant: Variant, track_index: TrackIndex, name: Annotated[str, Field(min_length=1, max_length=96)],
+    plugin_format: LiveFormat = "vst3",
+) -> dict[str, Any]:
+    """Request loading a named Serum preset from the managed Live User Library folder.
+
+    Export the preset first with export_serum_live_preset. Use get_track_info
+    to confirm Live's device chain after the load request.
+    """
+    try:
+        filename = check_live_preset(variant, name, plugin_format)
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
+    ableton = get_ableton_connection()
+    track = ableton.send_command("get_track_info", {"track_index": track_index})
+    if variant == "instrument" and not track.get("is_midi_track"):
+        raise ToolError("Serum 2 instrument presets require a MIDI track.")
+    browser = ableton.send_command("get_browser_items_at_path", {"path": LIVE_PRESET_BROWSER})
+    matches = [item for item in browser.get("items", []) if item.get("name") == filename and item.get("is_loadable")]
+    if len(matches) != 1 or not matches[0].get("uri"):
+        raise ToolError(f"Live has not indexed exactly one loadable {filename!r} in User Library/{LIVE_PRESET_FOLDER}.")
+    uri = matches[0]["uri"]
+    result = ableton.send_command("load_browser_item", {"track_index": track_index, "item_uri": uri})
+    if result.get("loaded") is not True:
+        raise ToolError(f"Live did not acknowledge the load request for {filename!r}. Check the device chain before retrying.")
+    return {"variant": variant, "track_index": track_index, "filename": filename,
+            "format": plugin_format, "uri": uri, "status": "load_requested"}
 
 
 def _serum_browser_items(ableton: AbletonConnection, plugin_format: str) -> list[dict[str, str]]:
