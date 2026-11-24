@@ -189,6 +189,8 @@ For portable files, embedded audio, and loading onto Live tracks, see
 [Serum preset tools](docs/serum-presets.md).
 To render patches with MIDI or audio input and measure revisions, see
 [Serum auditions](docs/serum-audition.md).
+To ask an MCP assistant for a sound in your own words, see
+[natural-language Serum sound design](docs/serum-sound-design.md).
 Use them to inspect settings, choose installed assets, and verify a batch of
 changes before making the next edit.
 

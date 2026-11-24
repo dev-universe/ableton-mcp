@@ -21,6 +21,7 @@ from .dataset.trajectory_decorator import trajectory_tool
 from .serum_controls import (
     FX_MODULES, MISSING, RACKS, Mode, SerumEdits, StatePath, describe, edit_state, list_assets, value_at,
 )
+from .serum_design import SERUM_CONTROL_HINTS, SERUM_DESIGN_WORKFLOW
 from .serum_presets import (
     LIVE_PRESET_BROWSER, LIVE_PRESET_FOLDER, LiveFormat, PresetDetails, check_live_preset,
     export_live_preset, export_preset, import_preset,
@@ -296,6 +297,7 @@ async def server_lifespan() -> AsyncIterator[None]:
 
 mcp = FastMCP(
     "AbletonMCP",
+    instructions="For a request to create or revise a Serum sound, use get_serum_design_workflow and the Serum tools.",
     host="127.0.0.1",
     stateless_http=True,
     json_response=True,
@@ -1036,6 +1038,21 @@ SERUM_BROWSER_PATHS = {
     "vst3": "plugins/VST3/Xfer Records",
     "au": "plugins/AUv2/Xfer Records",
 }
+
+
+@mcp.prompt(title="Design a Serum sound", description="Turn a natural-language sound brief into a rendered Serum preset.")
+def serum_sound_design(brief: str) -> str:
+    return f"{SERUM_DESIGN_WORKFLOW}\n{SERUM_CONTROL_HINTS}\nSound brief\n\n{brief}"
+
+
+@mcp.tool(annotations=READ_ONLY)
+def get_serum_design_workflow() -> dict[str, str]:
+    """Get the authoring workflow for a user's natural-language Serum 2 or Serum 2 FX request.
+
+    Use this for creation or revision before calling the state-edit, audio
+    comparison, and preset-save tools. The MCP client interprets the brief.
+    """
+    return {"workflow": SERUM_DESIGN_WORKFLOW, "control_hints": SERUM_CONTROL_HINTS}
 
 
 @mcp.tool(annotations=READ_ONLY)
