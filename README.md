@@ -184,6 +184,10 @@ To adjust a plug-in control, add it to the device panel with Live's
 value, and range, then pass that index and a value to `set_device_parameter`.
 Parameter assignments belong to each instance. [Ableton Live manual](https://www.ableton.com/en/live-manual/12/using-plug-ins/).
 
+For isolated sound design, see [Serum processor controls](docs/serum-control-reference.md).
+Use them to inspect settings, choose installed assets, and verify a batch of
+changes before making the next edit.
+
 ### ChatGPT web via Secure MCP Tunnel
 
 Run the HTTP server in a terminal and leave it open:
