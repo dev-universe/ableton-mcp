@@ -24,7 +24,7 @@ from .serum_controls import (
 from .serum_design import SERUM_CONTROL_HINTS, SERUM_DESIGN_WORKFLOW
 from .serum_presets import (
     LIVE_PRESET_BROWSER, LIVE_PRESET_FOLDER, LiveFormat, PresetDetails, check_live_preset,
-    export_live_preset, export_preset, import_preset,
+    export_live_preset, export_preset, import_preset, list_factory_presets,
 )
 from .serum_render import Audition, render_audio
 from .serum_state import SUPPORTED_BUILD, SerumError, Variant, initial_state
@@ -1094,6 +1094,8 @@ def get_serum_control_state(
             source = "native_default"
         if value is MISSING:
             raise SerumError(f"Serum state path is absent: {path}")
+        if path == ["ClipPlayer0", "activeClips"] and state_id is not None:
+            source = "preset"
         return {"variant": variant, "state_id": state_id, "path": path,
                 "value": describe(value, path[-1]), "source": source}
     except (SerumError, OSError) as exc:
@@ -1130,12 +1132,31 @@ def save_serum_preset(variant: Variant, state_id: str, details: PresetDetails) -
         raise ToolError(str(exc)) from exc
 
 
+@mcp.tool(annotations=READ_ONLY)
+def list_serum_factory_presets(
+    variant: Variant | None = None,
+    search: str = "",
+    offset: Annotated[int, Field(ge=0, strict=True)] = 0,
+    limit: Annotated[int, Field(ge=1, le=200, strict=True)] = 50,
+) -> dict[str, Any]:
+    """Find installed Factory presets by name or category such as Pad.
+
+    Pass an entry's absolute path and variant to import_serum_preset.
+    """
+    try:
+        return list_factory_presets(variant, search, offset, limit)
+    except (SerumError, OSError) as exc:
+        raise ToolError(str(exc)) from exc
+
+
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False))
 def import_serum_preset(variant: Variant, path: str) -> dict[str, Any]:
-    """Open a local Serum 2.1.5 native preset as an editable processor state.
+    """Open a supported native Serum preset as an editable processor state.
 
     Pass the absolute .SerumPreset path. Use the returned state_id in edit_serum_state.
+    The installed Serum 2.1.5 processor migrates supported older Factory formats.
     normalized_sections lists where the processor changed or omitted native file data.
+    preserved_preset_clips lists active clip indices carried into the editable state.
     """
     try:
         return import_preset(variant, path)

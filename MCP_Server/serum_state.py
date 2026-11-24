@@ -114,6 +114,35 @@ def encode_state(state: SerumState) -> bytes:
     return raw
 
 
+def preset_active_clips(state: SerumState) -> list[int]:
+    player = state.data.get("ClipPlayer0")
+    if not isinstance(player, dict) or "activeClips" not in player:
+        return []
+    clips = player["activeClips"]
+    if not isinstance(clips, list) or len(clips) > 12 or any(
+        type(index) is not int or not 0 <= index < 12 for index in clips
+    ):
+        raise SerumError("Invalid Serum preset active clip selection.")
+    return clips
+
+
+def preserve_preset_active_clips(raw: bytes, source: SerumState) -> bytes:
+    clips = preset_active_clips(source)
+    if not clips:
+        return raw
+    readback = decode_state(raw)
+    player = readback.data.get("ClipPlayer0")
+    if not isinstance(player, dict):
+        raise SerumError("Serum processor did not retain the preset clip player.")
+    if "activeClips" in player:
+        if preset_active_clips(readback) != clips:
+            raise SerumError("Serum processor changed the preset's active clip selection.")
+        return raw
+    # getState omits the selection that setState uses to launch the preset's clips.
+    player["activeClips"] = clips
+    return encode_state(readback)
+
+
 def state_directory() -> Path:
     default = Path.home() / "Library" / "Application Support" / "AbletonMCP" / "Serum" / "States"
     return Path(os.environ.get("ABLETON_MCP_SERUM_STATES", default)).expanduser()

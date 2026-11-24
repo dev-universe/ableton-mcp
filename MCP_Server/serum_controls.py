@@ -17,7 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, StrictFloat, Stric
 
 from .serum_state import (
     ASSET_ROOT, SUPPORTED_BUILD, SerumError, SerumState, Variant, decode_state,
-    initial_state, run_host, save_state,
+    initial_state, preserve_preset_active_clips, preset_active_clips, run_host, save_state,
 )
 
 Mode = Literal["wavetable", "sample", "granular", "spectral", "multisample"]
@@ -380,7 +380,10 @@ def edit_state(variant: Variant, edits: SerumEdits, base_state_id: str | None = 
     reserved = set(base.metadata) | {"component", "fileType", "hash", "product", "productVersion", "version"}
     for path, value in changes:
         _set_value(edited, path, value, reserved)
-    result, _ = run_host(variant, SerumState(base.metadata, edited))
+    requested = SerumState(base.metadata, edited)
+    if preset_active_clips(requested) != preset_active_clips(base):
+        raise SerumError("The imported preset's active clip selection cannot be edited through processor readback.")
+    result, _ = run_host(variant, requested)
     actual = decode_state(result).data
     checked = []
     for path, expected in changes:
@@ -394,4 +397,5 @@ def edit_state(variant: Variant, edits: SerumEdits, base_state_id: str | None = 
         if defaults:
             receipt["native_defaults"] = defaults
         checked.append(receipt)
-    return {"state_id": save_state(result), "variant": variant, "build": SUPPORTED_BUILD, "changes": checked}
+    return {"state_id": save_state(preserve_preset_active_clips(result, base)),
+            "variant": variant, "build": SUPPORTED_BUILD, "changes": checked}

@@ -129,3 +129,24 @@ def test_verified_native_defaults_allow_center_and_eq_shelf_reset(tmp_path, monk
     with pytest.raises(SerumError, match="did not retain"):
         serum_controls.edit_state("instrument", edits)
     assert len(list(tmp_path.iterdir())) == 1
+
+
+def test_unrelated_edit_preserves_imported_clip_selection(tmp_path, monkeypatch):
+    monkeypatch.setenv("ABLETON_MCP_SERUM_STATES", str(tmp_path))
+    base = processor()
+    base.data["ClipPlayer0"] = {"activeClips": [2, 0]}
+    readback = processor()
+    readback.data["ClipPlayer0"] = {}
+    readback.data["Env0"] = {"plainParams": {"kParamAttack": 0.2}}
+    monkeypatch.setattr(serum_controls, "initial_state", lambda *args: base)
+    monkeypatch.setattr(serum_controls, "run_host", lambda *args: (encode_state(readback), None))
+    edits = SerumEdits.model_validate({"values": [
+        {"path": ["Env0", "plainParams", "kParamAttack"], "value": 0.2},
+    ]})
+    result = serum_controls.edit_state("instrument", edits)
+    state = serum_state.read_saved_state(result["state_id"], "instrument")
+    assert state.data["ClipPlayer0"]["activeClips"] == [2, 0]
+
+    replacement = SerumEdits.model_validate({"values": [{"path": ["ClipPlayer0"], "value": {}}]})
+    with pytest.raises(SerumError, match="active clip selection cannot be edited"):
+        serum_controls.edit_state("instrument", replacement)

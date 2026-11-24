@@ -11,8 +11,12 @@ verified `state_id` from `edit_serum_state` or `import_serum_preset`.
 - `import_serum_preset` takes the matching `variant` and absolute `path`. It
   publishes the processor readback as an editable state. `normalized_sections`
   reports any native sections changed or omitted by the processor, including
-  editor preferences. Open and resave older presets with Serum 2.1.5 before
-  importing them with this tool.
+  editor preferences. `source_product_version`, `source_schema_version`, and
+  `migrated` identify the input and whether Serum upgraded its processor state.
+  Some presets activate clips on load. `preserved_preset_clips` lists those
+  indices when MCP carries them forward after the processor omits them from
+  its readback. The processor readback itself remains the basis for
+  `normalized_sections`.
 - Native files default to `~/Library/Application Support/AbletonMCP/Serum/Presets`.
   Set `ABLETON_MCP_SERUM_PRESETS` to use another directory. Files with the same
   name are preserved. Choose a new name for a revision.
@@ -25,6 +29,29 @@ Wavetable mode uses mono WAV in 2048-sample cycles, up to 256 cycles. Each
 asset is limited to 524,288 PCM samples. Factory assets selected from the
 installed library retain their relative path. Multisample SFZs also remain
 library references.
+
+## Revise a Factory preset
+
+1. Search installed presets with `list_serum_factory_presets`. Use an optional
+   `variant` and search by preset name or category, such as `Pad`. Entries
+   include the product variant and an absolute path for import.
+2. Call `import_serum_preset` with the entry's variant and path. The native
+   Serum 2.1.5 processor migrates the Factory versions listed below.
+3. Edit the returned state with `edit_serum_state` and render it with
+   `render_serum_audio`. Save it with `save_serum_preset` under a new name.
+
+| Product | Source build | Source schema |
+| --- | --- | --- |
+| Serum 2 | 2.0.11 | 3, 4 |
+| Serum 2 | 2.0.12 | 4, 5 |
+| Serum 2 | 2.0.13 | 5, 6 |
+| Serum 2 | 2.0.14, 2.0.15 | 6 |
+| Serum 2 FX | 2.0.13 | 5 |
+
+The import validates the preset container and version before sending its
+contents to the native processor. Unsupported older presets can be opened
+and resaved through the Serum 2.1.5 editor first. Factory media remains
+referenced in the installed library.
 
 ## Load through Ableton Live
 

@@ -5,7 +5,8 @@ SERUM_DESIGN_WORKFLOW = """Create or revise a real Serum preset when the user as
 1. Translate the brief into a sound source, articulation, modulation, and effects as needed.
    Use variant instrument for a playable MIDI patch and fx for processing incoming audio.
    Start at Init for a new sound. For a revision, use the previous state_id, or import the
-   named .SerumPreset and use its verified state_id. Inspect the relevant paths first.
+   named .SerumPreset and use its verified state_id. For a Factory preset, find its path
+   with list_serum_factory_presets. Inspect the relevant paths first.
 2. Use list_serum_assets for installed oscillator sources. Use embedded_assets for an
    original PCM16 WAV when the brief needs a self-contained asset. Use edit_serum_state
    for native values and ordered effect chains. Read the tool's verified values. If a field
