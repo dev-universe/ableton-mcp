@@ -59,6 +59,8 @@ ASSET_PATH_KEYS = {
 }
 MEDIA_KEYS = {"embeddedWTData", "embedded_audio", "relativePathToWT", "pathToWT", "samplePathRelative", "samplePath"}
 MAX_EMBEDDED_SAMPLES = 512 * 1024
+OSCILLATORS = {"Oscillator0", "Oscillator1", "Oscillator2"}
+MACROS = {f"Macro{index}" for index in range(8)}
 MOD_SLOT = re.compile(r"ModSlot(?:[0-9]|[1-5][0-9]|6[0-3])\Z")
 PARAM_NAME = re.compile(r"kParam[A-Za-z0-9_]{1,64}\Z")
 MISSING = object()
@@ -122,6 +124,26 @@ def value_at(data: JsonValue, path: list[PathPart]):
         else:
             return MISSING
     return value
+
+
+def native_default(data: dict, path: list[PathPart]):
+    """Return a schema-11 default that the processor omits in a verified location."""
+    if len(path) < 3 or path[-2] != "plainParams" or not isinstance(value_at(data, path[:-2]), dict):
+        return MISSING
+    root, field = path[0], path[-1]
+    if len(path) == 3:
+        if root in OSCILLATORS and field == "kParamType":
+            return "kOsc_WT"
+        if root in OSCILLATORS and field == "kParamPan":
+            return 0
+        if root in {"Oscillator1", "Oscillator2"} and field == "kParamEnable":
+            return 0
+        if (root == "Global0" and field == "kParamModWheel") or (root in MACROS and field == "kParamValue"):
+            return 0
+    if (len(path) == 6 and root in RACKS.values() and path[1] == "FX" and path[3] == "FXEQ"
+            and value_at(data, [*path[:3], "type"]) == 7 and field in {"kParamType1", "kParamType2"}):
+        return 0
+    return MISSING
 
 
 def equivalent(actual, expected) -> bool:
@@ -315,6 +337,25 @@ def _effect_edits(chain: EffectChain) -> tuple[list[PathPart], JsonValue]:
     return [RACKS[chain.bus], "FX"], modules
 
 
+def _with_native_defaults(actual, expected, data: dict, path: list[PathPart], defaults: list[list[PathPart]]):
+    if actual is MISSING:
+        value = native_default(data, path)
+        if value is not MISSING:
+            defaults.append(path)
+        return value
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        result = actual.copy()
+        for key, child in expected.items():
+            value = _with_native_defaults(actual.get(key, MISSING), child, data, [*path, key], defaults)
+            if value is not MISSING:
+                result[key] = value
+        return result
+    if isinstance(actual, list) and isinstance(expected, list) and len(actual) == len(expected):
+        return [_with_native_defaults(got, wanted, data, [*path, index], defaults)
+                for index, (got, wanted) in enumerate(zip(actual, expected))]
+    return actual
+
+
 def edit_state(variant: Variant, edits: SerumEdits, base_state_id: str | None = None) -> dict:
     changes = [(item.path, item.value) for item in edits.values]
     for asset in edits.oscillator_assets:
@@ -344,9 +385,13 @@ def edit_state(variant: Variant, edits: SerumEdits, base_state_id: str | None = 
     checked = []
     for path, expected in changes:
         readback = value_at(actual, path)
-        if readback is MISSING and expected == "kOsc_WT" and path[-1] == "kParamType":
-            readback = "kOsc_WT"
+        defaults = []
         if not equivalent(readback, expected):
-            raise SerumError(f"Serum did not retain {path}. Readback was {describe(readback, path[-1])!r}.")
-        checked.append({"path": path, "value": describe(readback, path[-1])})
+            readback = _with_native_defaults(readback, expected, actual, path, defaults)
+            if not equivalent(readback, expected):
+                raise SerumError(f"Serum did not retain {path}. Readback was {describe(readback, path[-1])!r}.")
+        receipt = {"path": path, "value": describe(readback, path[-1])}
+        if defaults:
+            receipt["native_defaults"] = defaults
+        checked.append(receipt)
     return {"state_id": save_state(result), "variant": variant, "build": SUPPORTED_BUILD, "changes": checked}

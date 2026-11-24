@@ -20,3 +20,22 @@ requested changes in dynamics, brightness, stereo spread, and tail length.
 
 See [preset formats and embedded assets](serum-presets.md) and
 [audition and measurement details](serum-audition.md).
+
+## Korean brief verification
+
+The installed Serum 2.1.5 instrument and FX were tested with Korean briefs
+for sounds and follow-up changes. The assistant chose the sound design from
+each brief and carried it out through a real stdio MCP session.
+
+| Brief and revision | Measured result |
+| --- | --- |
+| Start from Init with a centered, slowly swelling intro pad. Narrow only the wide layer. | Two original wavetables were embedded. Oscillator B width moved from 83 to 67 and stereo side energy fell from 3.80% to 2.52%. The isolated center layer's audio was byte-identical and both envelopes stayed the same. Both versions crossed −80 dBFS about 0.98 s after note-off. |
+| Keep a kick centered and add alternating eighth-note echoes at 120 BPM. Shorten only the decay of the repeats. | The direct hit stayed mono and within 0.11 dB RMS of the empty rack. The first two echoes retained their levels and the 250 ms left/right pattern remained. With a −70 dBFS measurement threshold, the final echo window moved from 1.035 s to 0.535 s, with direct onset at 0.035 s. |
+
+The saved revisions were imported into fresh processors and rendered again
+with identical output. The pad import was performed after moving the two WAV
+sources out of their original paths. Live 12.4.15 also loaded the pad as VST3
+and the kick effect as AU on temporary tracks. Their states captured from
+Live preserved the targeted settings and produced byte-identical output when
+replayed with the same stimuli in the audition host. The test tracks were
+removed and the original Live set snapshot matched the baseline.

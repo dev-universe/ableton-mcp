@@ -19,7 +19,7 @@ from .telemetry_decorator import telemetry_tool, rich_telemetry_tool
 from .dataset import dataset_enabled, get_recorder
 from .dataset.trajectory_decorator import trajectory_tool
 from .serum_controls import (
-    FX_MODULES, MISSING, RACKS, Mode, SerumEdits, StatePath, describe, edit_state, list_assets, value_at,
+    FX_MODULES, MISSING, RACKS, Mode, SerumEdits, StatePath, describe, edit_state, list_assets, native_default, value_at,
 )
 from .serum_design import SERUM_CONTROL_HINTS, SERUM_DESIGN_WORKFLOW
 from .serum_presets import (
@@ -1088,9 +1088,14 @@ def get_serum_control_state(
                 "effect_modules": list(FX_MODULES), "effect_buses": list(RACKS),
             }
         value = value_at(state.data, path)
+        source = "processor"
+        if value is MISSING:
+            value = native_default(state.data, path)
+            source = "native_default"
         if value is MISSING:
             raise SerumError(f"Serum state path is absent: {path}")
-        return {"variant": variant, "state_id": state_id, "path": path, "value": describe(value, path[-1])}
+        return {"variant": variant, "state_id": state_id, "path": path,
+                "value": describe(value, path[-1]), "source": source}
     except (SerumError, OSError) as exc:
         raise ToolError(str(exc)) from exc
 
